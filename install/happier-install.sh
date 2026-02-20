@@ -20,6 +20,23 @@ verb_ip6
 catch_errors
 setting_up_container
 network_check
+
+wait_for_apt_locks() {
+  local waited_s=0
+  while fuser /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/lib/apt/lists/lock /var/cache/apt/archives/lock >/dev/null 2>&1; do
+    sleep 3
+    waited_s=$((waited_s + 3))
+    if ((waited_s >= 300)); then
+      msg_error "apt is busy (locks held > ${waited_s}s). Try again in a minute."
+      exit 1
+    fi
+  done
+}
+
+msg_info "Waiting for apt locks (if any)"
+wait_for_apt_locks
+msg_ok "apt ready"
+
 update_os
 
 INSTALL_TYPE="${HAPPIER_PVE_INSTALL_TYPE:-devbox}"      # devbox | server_only
