@@ -1,0 +1,44 @@
+{
+    "name": "Happier",
+    "slug": "happier",
+    "categories": [
+        20
+    ],
+    "date_created": "2026-02-07",
+    "type": "ct",
+    "updateable": false,
+    "privileged": false,
+    "interface_port": 3005,
+    "documentation": "https://happier.dev/docs/deployment/proxmox",
+    "website": "https://happier.dev",
+    "logo": "https://app.happier.dev/favicon.ico",
+    "config_path": "/home/happier/.happier/stacks/main/env",
+    "description": "Happier is a self-hostable UI/CLI stack for monitoring and interacting with Claude Code, Codex, and Gemini sessions from a web UI and mobile.",
+    "install_methods": [
+        {
+            "type": "default",
+            "script": "ct/happier.sh",
+            "resources": {
+                "cpu": 4,
+                "ram": 8192,
+                "hdd": 32,
+                "os": "debian",
+                "version": "13"
+            }
+        }
+    ],
+    "default_credentials": {
+        "username": null,
+        "password": null
+    },
+    "notes": [
+        {
+            "text": "The Happier web UI requires HTTPS for remote access (secure context). Use Tailscale Serve or your reverse proxy.",
+            "type": "warning"
+        },
+        {
+            "text": "This script installs the upstream Happier stack via npx (@happier-dev/stack). Review sources before installing.",
+            "type": "warning"
+        }
+    ]
+}
