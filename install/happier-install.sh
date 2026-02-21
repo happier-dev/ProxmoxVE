@@ -182,6 +182,68 @@ set_env_kv() {
   fi
 }
 
+extract_https_url_from_text() {
+  awk '
+    {
+      for (i = 1; i <= NF; i++) {
+        if ($i ~ /^https:\/\//) {
+          gsub(/\r/, "", $i)
+          print $i
+          exit
+        }
+      }
+    }
+  '
+}
+
+tailscale_wait_until_online() {
+  local attempts="${1:-20}"
+  local sleep_s="${2:-2}"
+  local i=1
+  while (( i <= attempts )); do
+    if "$TAILSCALE_BIN" ip -4 >/dev/null 2>&1 || "$TAILSCALE_BIN" ip -6 >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep "$sleep_s"
+    i=$((i + 1))
+  done
+  return 1
+}
+
+detect_tailscale_https_url() {
+  local detected=""
+  detected="$(sudo -u happier -H "$HSTACK_BIN" tailscale url 2>/dev/null | extract_https_url_from_text || true)"
+  if [[ "$detected" == https://* ]]; then
+    printf '%s' "$detected"
+    return 0
+  fi
+
+  detected="$("$TAILSCALE_BIN" serve status 2>/dev/null | extract_https_url_from_text || true)"
+  if [[ "$detected" == https://* ]]; then
+    printf '%s' "$detected"
+    return 0
+  fi
+
+  return 1
+}
+
+resolve_tailscale_https_url_with_retries() {
+  local attempts="${1:-10}"
+  local sleep_s="${2:-2}"
+  local i=1
+  local detected=""
+  while (( i <= attempts )); do
+    detected="$(detect_tailscale_https_url || true)"
+    if [[ "$detected" == https://* ]]; then
+      printf '%s' "$detected"
+      return 0
+    fi
+    sleep "$sleep_s"
+    i=$((i + 1))
+  done
+  return 1
+}
+
 set_env_kv "$STACK_ENV_FILE" "HAPPIER_SERVER_HOST" "${SERVER_HOST}"
 set_env_kv "$STACK_ENV_FILE" "HAPPIER_STACK_BIND_MODE" "${SETUP_BIND}"
 if [[ "${INSTALL_TYPE}" == "server_only" ]]; then
@@ -240,7 +302,11 @@ if [[ "${REMOTE_ACCESS}" == "tailscale" ]]; then
   if [[ -n "${TAILSCALE_AUTHKEY}" ]]; then
     msg_info "Enrolling Tailscale (pre-auth key)"
     tailscale up --auth-key="${TAILSCALE_AUTHKEY}" >/dev/null 2>&1 || true
-    msg_ok "Tailscale enrollment attempted"
+    if tailscale_wait_until_online 20 2; then
+      msg_ok "Tailscale enrollment attempted"
+    else
+      msg_warn "Tailscale enrollment attempted, but node is not online yet."
+    fi
     TAILSCALE_ENABLE_SERVE="1"
   fi
 fi
@@ -269,7 +335,15 @@ fi
 if [[ "${REMOTE_ACCESS}" == "tailscale" && "${TAILSCALE_ENABLE_SERVE}" == "1" ]]; then
   msg_info "Enabling Tailscale Serve (best-effort)"
   sudo -u happier -H "$HSTACK_BIN" tailscale enable >/dev/null 2>&1 || true
-  TAILSCALE_HTTPS_URL="$(sudo -u happier -H "$HSTACK_BIN" tailscale url 2>/dev/null | tail -n 1 | tr -d '\r' || true)"
+
+  TAILSCALE_HTTPS_URL="$(resolve_tailscale_https_url_with_retries 8 2 || true)"
+  if [[ -z "${TAILSCALE_HTTPS_URL}" ]]; then
+    msg_info "Falling back to direct tailscale serve mapping"
+    "$TAILSCALE_BIN" serve reset >/dev/null 2>&1 || true
+    "$TAILSCALE_BIN" serve --bg http://127.0.0.1:3005 >/dev/null 2>&1 || true
+    TAILSCALE_HTTPS_URL="$(resolve_tailscale_https_url_with_retries 8 2 || true)"
+  fi
+
   if [[ -n "${TAILSCALE_HTTPS_URL}" ]]; then
     set_env_kv "$STACK_ENV_FILE" "HAPPIER_STACK_SERVER_URL" "${TAILSCALE_HTTPS_URL}"
   fi
