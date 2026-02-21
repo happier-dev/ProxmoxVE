@@ -51,6 +51,7 @@ TAILSCALE_ENABLE_SERVE="0"
 TAILSCALE_HTTPS_URL=""
 TAILSCALE_NEEDS_LOGIN="0"
 TAILSCALE_AUTH_INVALID="0"
+TAILSCALE_AUTH_URL=""
 
 normalize_url_no_trailing_slash() {
   local v
@@ -274,6 +275,21 @@ tailscale_status_json_field() {
     | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('${key}',''))" 2>/dev/null || true
 }
 
+wait_for_systemd_active() {
+  local unit="$1"
+  local attempts="${2:-30}"
+  local sleep_s="${3:-1}"
+  local i=1
+  while (( i <= attempts )); do
+    if systemctl is-active --quiet "$unit" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep "$sleep_s"
+    i=$((i + 1))
+  done
+  return 1
+}
+
 set_env_kv "$STACK_ENV_FILE" "HAPPIER_SERVER_HOST" "${SERVER_HOST}"
 set_env_kv "$STACK_ENV_FILE" "HAPPIER_STACK_BIND_MODE" "${SETUP_BIND}"
 if [[ "${INSTALL_TYPE}" == "server_only" ]]; then
@@ -333,11 +349,15 @@ if [[ "${REMOTE_ACCESS}" == "tailscale" ]]; then
 
   if [[ -n "${TAILSCALE_AUTHKEY}" ]]; then
     msg_info "Enrolling Tailscale (pre-auth key)"
+    if ! wait_for_systemd_active tailscaled 30 1; then
+      msg_warn "tailscaled service did not report active yet; continuing anyway."
+    fi
     TAILSCALE_UP_OUTPUT=""
     TAILSCALE_UP_EXIT=0
+    TAILSCALE_UP_ARGS=(up "--authkey=${TAILSCALE_AUTHKEY}")
     if command -v timeout >/dev/null 2>&1; then
       set +e
-      TAILSCALE_UP_OUTPUT="$(timeout 120 "$TAILSCALE_BIN" up --auth-key="${TAILSCALE_AUTHKEY}" 2>&1)"
+      TAILSCALE_UP_OUTPUT="$(timeout 120 "$TAILSCALE_BIN" "${TAILSCALE_UP_ARGS[@]}" 2>&1)"
       TAILSCALE_UP_EXIT=$?
       set -e
       if [[ $TAILSCALE_UP_EXIT -eq 124 || $TAILSCALE_UP_EXIT -eq 137 ]]; then
@@ -345,7 +365,7 @@ if [[ "${REMOTE_ACCESS}" == "tailscale" ]]; then
       fi
     else
       set +e
-      TAILSCALE_UP_OUTPUT="$("$TAILSCALE_BIN" up --auth-key="${TAILSCALE_AUTHKEY}" 2>&1)"
+      TAILSCALE_UP_OUTPUT="$("$TAILSCALE_BIN" "${TAILSCALE_UP_ARGS[@]}" 2>&1)"
       TAILSCALE_UP_EXIT=$?
       set -e
     fi
@@ -353,13 +373,19 @@ if [[ "${REMOTE_ACCESS}" == "tailscale" ]]; then
     if printf '%s' "${TAILSCALE_UP_OUTPUT}" | grep -Eiq 'invalid key|not valid|expired|unauthorized'; then
       TAILSCALE_AUTH_INVALID="1"
       TAILSCALE_NEEDS_LOGIN="1"
+      TAILSCALE_AUTH_URL="$(tailscale_status_json_field AuthURL)"
       msg_warn "Tailscale auth key was rejected."
       msg_warn "tailscale up output: $(printf '%s' "${TAILSCALE_UP_OUTPUT}" | tail -n 1)"
       msg_warn "Use a fresh reusable pre-auth key, or run tailscale up manually after install."
     elif [[ $TAILSCALE_UP_EXIT -eq 124 || $TAILSCALE_UP_EXIT -eq 137 ]]; then
       TAILSCALE_NEEDS_LOGIN="1"
+      TAILSCALE_AUTH_URL="$(tailscale_status_json_field AuthURL)"
       msg_warn "Tailscale enrollment did not complete within the timeout window."
-      msg_warn "Run inside the container: tailscale up"
+      if [[ -n "${TAILSCALE_AUTH_URL}" ]]; then
+        msg_warn "Tailscale login URL: ${TAILSCALE_AUTH_URL}"
+      else
+        msg_warn "Run inside the container: tailscale up"
+      fi
     elif tailscale_wait_until_online 90 2; then
       msg_ok "Tailscale enrollment attempted"
       TAILSCALE_ENABLE_SERVE="1"
@@ -464,19 +490,23 @@ fi
 if [[ -n "${TAILSCALE_HTTPS_URL}" ]]; then
   echo -e "${INFO}${YW} Access (HTTPS): ${CL}${TAB}${GATEWAY}${BGN}${TAILSCALE_HTTPS_URL}${CL}"
 elif [[ "${REMOTE_ACCESS}" == "tailscale" ]]; then
+  [[ -z "${TAILSCALE_AUTH_URL}" ]] && TAILSCALE_AUTH_URL="$(tailscale_status_json_field AuthURL)"
   if [[ "${TAILSCALE_AUTH_INVALID}" == "1" ]]; then
     echo -e "${INFO}${YW} Tailscale auth failed:${CL} provided pre-auth key was rejected."
     echo -e "${TAB}${YW}Fix:${CL} provide a valid reusable auth key, or run manual login:"
+    if [[ -n "${TAILSCALE_AUTH_URL}" ]]; then
+      echo -e "${TAB}${YW}Login URL:${CL} ${TAILSCALE_AUTH_URL}"
+    fi
     echo -e "${TAB}${GATEWAY}${BGN}tailscale up${CL}"
     echo -e "${TAB}${GATEWAY}${BGN}tailscale set --operator=happier${CL}"
     echo -e "${TAB}${GATEWAY}${BGN}tailscale serve --bg http://127.0.0.1:3005${CL}"
     echo -e "${TAB}${GATEWAY}${BGN}su - happier -c \"${HSTACK_BIN} tailscale url\"${CL}"
   elif [[ -z "${TAILSCALE_AUTHKEY}" || "${TAILSCALE_NEEDS_LOGIN}" == "1" ]]; then
     echo -e "${INFO}${YW} Tailscale:${CL} enroll it inside the container, then enable Serve:"
-    echo -e "${TAB}${GATEWAY}${BGN}tailscale up${CL}"
-    if [[ "${TAILSCALE_NEEDS_LOGIN}" == "1" ]]; then
-      echo -e "${TAB}${YW}A login URL may have been printed above in warnings.${CL}"
+    if [[ -n "${TAILSCALE_AUTH_URL}" ]]; then
+      echo -e "${TAB}${YW}Login URL:${CL} ${TAILSCALE_AUTH_URL}"
     fi
+    echo -e "${TAB}${GATEWAY}${BGN}tailscale up${CL}"
     echo -e "${TAB}${GATEWAY}${BGN}su - happier -c \"${HSTACK_BIN} tailscale enable\"${CL}"
     echo -e "${TAB}${GATEWAY}${BGN}su - happier -c \"${HSTACK_BIN} tailscale url\"${CL}"
   elif [[ "${TAILSCALE_ENABLE_SERVE}" == "1" ]]; then
