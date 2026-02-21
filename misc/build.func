@@ -3483,8 +3483,14 @@ run_app_installer_in_ct() {
     msg_error "Failed to download installer script: ${installer_url}"
     return 1
   fi
+  if [[ -z "${installer_script//[[:space:]]/}" ]]; then
+    msg_error "Downloaded installer script is empty: ${installer_url}"
+    return 1
+  fi
 
-  lxc-attach -n "$CTID" -- bash -c "$installer_script"
+  # Run the script via stdin to avoid brittle quoting/length limits of `bash -c "$script"`.
+  # Note: environment variables exported by the helper framework remain available to the installer.
+  printf '%s\n' "$installer_script" | lxc-attach -n "$CTID" -- bash -s
 }
 
 build_container() {

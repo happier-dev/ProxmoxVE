@@ -1449,9 +1449,15 @@ cleanup_lxc() {
     rm -rf /var/cache/apk/*
   else
     # Avoid indefinite hangs if apt/dpkg locks are held by background timers.
-    $STD DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=60 -y autoremove 2>/dev/null || msg_warn "apt autoremove failed (non-critical)"
-    $STD DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=60 -y autoclean 2>/dev/null || msg_warn "apt autoclean failed (non-critical)"
-    $STD DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=60 -y clean 2>/dev/null || msg_warn "apt clean failed (non-critical)"
+    if command -v timeout >/dev/null 2>&1; then
+      $STD DEBIAN_FRONTEND=noninteractive timeout 300 apt-get -o DPkg::Lock::Timeout=60 -y autoremove 2>/dev/null || msg_warn "apt autoremove failed (non-critical)"
+      $STD DEBIAN_FRONTEND=noninteractive timeout 300 apt-get -o DPkg::Lock::Timeout=60 -y autoclean 2>/dev/null || msg_warn "apt autoclean failed (non-critical)"
+      $STD DEBIAN_FRONTEND=noninteractive timeout 300 apt-get -o DPkg::Lock::Timeout=60 -y clean 2>/dev/null || msg_warn "apt clean failed (non-critical)"
+    else
+      $STD DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=60 -y autoremove 2>/dev/null || msg_warn "apt autoremove failed (non-critical)"
+      $STD DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=60 -y autoclean 2>/dev/null || msg_warn "apt autoclean failed (non-critical)"
+      $STD DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=60 -y clean 2>/dev/null || msg_warn "apt clean failed (non-critical)"
+    fi
   fi
 
   find /tmp /var/tmp -type f -name 'tmp*' -delete 2>/dev/null || true

@@ -311,7 +311,22 @@ if [[ "${REMOTE_ACCESS}" == "tailscale" ]]; then
 
   if [[ -n "${TAILSCALE_AUTHKEY}" ]]; then
     msg_info "Enrolling Tailscale (pre-auth key)"
-    TAILSCALE_UP_OUTPUT="$("$TAILSCALE_BIN" up --auth-key="${TAILSCALE_AUTHKEY}" 2>&1 || true)"
+    TAILSCALE_UP_OUTPUT=""
+    TAILSCALE_UP_EXIT=0
+    if command -v timeout >/dev/null 2>&1; then
+      set +e
+      TAILSCALE_UP_OUTPUT="$(timeout 120 "$TAILSCALE_BIN" up --auth-key="${TAILSCALE_AUTHKEY}" 2>&1)"
+      TAILSCALE_UP_EXIT=$?
+      set -e
+      if [[ $TAILSCALE_UP_EXIT -eq 124 || $TAILSCALE_UP_EXIT -eq 137 ]]; then
+        msg_warn "tailscale up timed out. Continuing with manual enrollment instructions."
+      fi
+    else
+      set +e
+      TAILSCALE_UP_OUTPUT="$("$TAILSCALE_BIN" up --auth-key="${TAILSCALE_AUTHKEY}" 2>&1)"
+      TAILSCALE_UP_EXIT=$?
+      set -e
+    fi
     "$TAILSCALE_BIN" set --operator=happier >/dev/null 2>&1 || true
     if printf '%s' "${TAILSCALE_UP_OUTPUT}" | grep -Eiq 'invalid key|not valid|expired|unauthorized'; then
       TAILSCALE_AUTH_INVALID="1"
@@ -319,6 +334,10 @@ if [[ "${REMOTE_ACCESS}" == "tailscale" ]]; then
       msg_warn "Tailscale auth key was rejected."
       msg_warn "tailscale up output: $(printf '%s' "${TAILSCALE_UP_OUTPUT}" | tail -n 1)"
       msg_warn "Use a fresh reusable pre-auth key, or run tailscale up manually after install."
+    elif [[ $TAILSCALE_UP_EXIT -eq 124 || $TAILSCALE_UP_EXIT -eq 137 ]]; then
+      TAILSCALE_NEEDS_LOGIN="1"
+      msg_warn "Tailscale enrollment did not complete within the timeout window."
+      msg_warn "Run inside the container: tailscale up"
     elif tailscale_wait_until_online 90 2; then
       msg_ok "Tailscale enrollment attempted"
       TAILSCALE_ENABLE_SERVE="1"
@@ -367,6 +386,7 @@ if [[ "${REMOTE_ACCESS}" == "tailscale" && "${TAILSCALE_ENABLE_SERVE}" == "1" ]]
 
   # On fresh nodes, cert/DNS readiness can lag behind tailscale up by ~1-2 minutes.
   # Keep retrying serve mapping before giving up to avoid manual follow-up in most installs.
+  msg_info "Waiting for Tailscale HTTPS URL (this can take a minute or two on fresh nodes)"
   if tailscale_wait_until_online 90 2; then
     "$TAILSCALE_BIN" serve reset >/dev/null 2>&1 || true
     for _ in $(seq 1 45); do

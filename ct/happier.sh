@@ -1,7 +1,18 @@
 #!/usr/bin/env bash
 INSTALLER_REPO="${INSTALLER_REPO:-happier-dev/ProxmoxVE}"
 INSTALLER_REF="${INSTALLER_REF:-main}"
-source <(curl -fsSL "https://raw.githubusercontent.com/${INSTALLER_REPO}/${INSTALLER_REF}/misc/build.func")
+export INSTALLER_REPO INSTALLER_REF
+
+BUILD_FUNC_URL="https://raw.githubusercontent.com/${INSTALLER_REPO}/${INSTALLER_REF}/misc/build.func"
+BUILD_FUNC="$(curl -fsSL "${BUILD_FUNC_URL}")" || {
+  echo "Failed to download build.func from: ${BUILD_FUNC_URL}" >&2
+  exit 1
+}
+if [[ -z "${BUILD_FUNC//[[:space:]]/}" ]]; then
+  echo "Downloaded build.func is empty: ${BUILD_FUNC_URL}" >&2
+  exit 1
+fi
+source /dev/stdin <<<"${BUILD_FUNC}"
 # Copyright (c) 2021-2026 community-scripts ORG
 # Author: happier-dev
 # License: MIT | https://github.com/community-scripts/ProxmoxVE/raw/main/LICENSE
@@ -15,7 +26,6 @@ var_disk="${var_disk:-32}"
 var_os="${var_os:-debian}"
 var_version="${var_version:-13}"
 var_unprivileged="${var_unprivileged:-1}"
-export INSTALLER_REPO INSTALLER_REF
 
 header_info "$APP"
 variables
