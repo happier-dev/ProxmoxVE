@@ -3472,6 +3472,21 @@ start() {
 # - Executes <app>-install.sh inside container
 # - Posts installation telemetry to API if diagnostics enabled
 # ------------------------------------------------------------------------------
+run_app_installer_in_ct() {
+  local installer_repo="${INSTALLER_REPO:-community-scripts/ProxmoxVE}"
+  local installer_ref="${INSTALLER_REF:-main}"
+  local installer_url="https://raw.githubusercontent.com/${installer_repo}/${installer_ref}/install/${var_install}.sh"
+  local installer_script=""
+
+  msg_info "Downloading installer script from ${installer_repo}@${installer_ref}"
+  if ! installer_script="$(curl -fsSL "$installer_url")"; then
+    msg_error "Failed to download installer script: ${installer_url}"
+    return 1
+  fi
+
+  lxc-attach -n "$CTID" -- bash -c "$installer_script"
+}
+
 build_container() {
   #  if [ "$VERBOSE" == "yes" ]; then set -x; fi
 
@@ -3545,11 +3560,20 @@ build_container() {
   # Build PCT_OPTIONS as string for export
   TEMP_DIR=$(mktemp -d)
   pushd "$TEMP_DIR" >/dev/null
+  local installer_repo="${INSTALLER_REPO:-community-scripts/ProxmoxVE}"
+  local installer_ref="${INSTALLER_REF:-main}"
+  local functions_url=""
+  local functions_payload=""
   if [ "$var_os" == "alpine" ]; then
-    export FUNCTIONS_FILE_PATH="$(curl -fsSL https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main/misc/alpine-install.func)"
+    functions_url="https://raw.githubusercontent.com/${installer_repo}/${installer_ref}/misc/alpine-install.func"
   else
-    export FUNCTIONS_FILE_PATH="$(curl -fsSL https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main/misc/install.func)"
+    functions_url="https://raw.githubusercontent.com/${installer_repo}/${installer_ref}/misc/install.func"
   fi
+  if ! functions_payload="$(curl -fsSL "$functions_url")"; then
+    msg_error "Failed to download helper functions: ${functions_url}"
+    exit 1
+  fi
+  export FUNCTIONS_FILE_PATH="$functions_payload"
 
   # Core exports for install.func
   export DIAGNOSTICS="$DIAGNOSTICS"
@@ -4052,7 +4076,7 @@ EOF'
   set +Eeuo pipefail # Disable ALL error handling temporarily
   trap - ERR         # Remove ERR trap completely
 
-  lxc-attach -n "$CTID" -- bash -c "$(curl -fsSL https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main/install/${var_install}.sh)"
+  run_app_installer_in_ct
   local lxc_exit=$?
 
   set -Eeuo pipefail       # Re-enable error handling
@@ -4378,7 +4402,7 @@ EOF'
           # Re-run install script in existing container (don't destroy/recreate)
           set +Eeuo pipefail
           trap - ERR
-          lxc-attach -n "$CTID" -- bash -c "$(curl -fsSL https://raw.githubusercontent.com/community-scripts/ProxmoxVE/main/install/${var_install}.sh)"
+          run_app_installer_in_ct
           local apt_retry_exit=$?
           set -Eeuo pipefail
           trap 'error_handler' ERR
