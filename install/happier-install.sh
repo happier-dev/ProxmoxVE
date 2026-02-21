@@ -76,11 +76,15 @@ HSTACK_CHANNEL="$(printf '%s' "${HSTACK_CHANNEL_RAW}" | tr -d '\r' | xargs | tr 
 HSTACK_PACKAGE="$(printf '%s' "${HSTACK_PACKAGE_RAW}" | tr -d '\r' | xargs)"
 if [[ -z "${HSTACK_PACKAGE}" ]]; then
   if [[ "${HSTACK_CHANNEL}" == "preview" ]]; then
-    HSTACK_PACKAGE="@happier-dev/stack@preview"
+    HSTACK_PACKAGE="@happier-dev/stack@next"
   else
     # stable/default
     HSTACK_PACKAGE="@happier-dev/stack@latest"
   fi
+fi
+if [[ "${HSTACK_PACKAGE}" == "@happier-dev/stack@preview" ]]; then
+  # Back-compat: "preview" maps to the npm dist-tag "next".
+  HSTACK_PACKAGE="@happier-dev/stack@next"
 fi
 if [[ -z "${HSTACK_PACKAGE}" ]]; then
   msg_error "HStack package spec is empty. Set HAPPIER_PVE_HSTACK_PACKAGE or HAPPIER_PVE_HSTACK_CHANNEL."

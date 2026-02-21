@@ -41,7 +41,7 @@
             "type": "warning"
         },
         {
-            "text": "Optional: choose which HStack channel/version to install by setting HAPPIER_PVE_HSTACK_CHANNEL=stable|preview or HAPPIER_PVE_HSTACK_PACKAGE='@happier-dev/stack@<tag-or-version>'.",
+            "text": "Optional: choose which HStack channel/version to install by setting HAPPIER_PVE_HSTACK_CHANNEL=stable|preview (preview maps to npm dist-tag @next), or HAPPIER_PVE_HSTACK_PACKAGE='@happier-dev/stack@<tag-or-version>'.",
             "type": "info"
         }
     ]
