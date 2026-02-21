@@ -100,10 +100,10 @@ function app_questions() {
   if [[ "$HAPPIER_PVE_REMOTE_ACCESS" == "tailscale" ]]; then
     var_tun="yes"
     if (whiptail --backtitle "$BACKTITLE" --title "TAILSCALE" --yesno \
-      "\nProvide a Tailscale pre-auth key now?\n\nRecommended: use an ephemeral, one-time key.\n\nIf you skip this, you can run 'tailscale up' later inside the container.\n" 14 72); then
+      "\nProvide a Tailscale pre-auth key now?\n\nRecommended: use an ephemeral, one-time key.\n\nIf you skip this, the installer will still install Tailscale and you can run 'tailscale up' later inside the container.\n" 14 72); then
       HAPPIER_PVE_TAILSCALE_AUTHKEY=$(
         whiptail --backtitle "$BACKTITLE" --title "TAILSCALE" --passwordbox \
-          "\nPaste your Tailscale pre-auth key (will not be saved):\n" 12 72 \
+          "\nPaste your Tailscale pre-auth key (optional; will not be saved).\n\nTip: leave blank to skip and enroll manually later.\n" 14 72 \
           3>&1 1>&2 2>&3
       ) || exit_script
     fi
