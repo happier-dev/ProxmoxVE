@@ -55,6 +55,8 @@ function app_questions() {
   HAPPIER_PVE_REMOTE_ACCESS="none"
   HAPPIER_PVE_TAILSCALE_AUTHKEY=""
   HAPPIER_PVE_PUBLIC_URL=""
+  HAPPIER_PVE_HSTACK_CHANNEL="${HAPPIER_PVE_HSTACK_CHANNEL:-stable}"
+  HAPPIER_PVE_HSTACK_PACKAGE="${HAPPIER_PVE_HSTACK_PACKAGE:-}"
 
   HAPPIER_PVE_INSTALL_TYPE=$(
     whiptail --backtitle "$BACKTITLE" --title "HAPPIER" --radiolist \
@@ -107,12 +109,58 @@ function app_questions() {
     fi
   fi
 
+  # HStack release channel selection (controls which npm dist-tag/version is installed via npx).
+  local hstack_default="stable"
+  if [[ -n "${HAPPIER_PVE_HSTACK_PACKAGE}" ]]; then
+    if [[ "${HAPPIER_PVE_HSTACK_PACKAGE}" == "@happier-dev/stack@preview" ]]; then
+      hstack_default="preview"
+    elif [[ "${HAPPIER_PVE_HSTACK_PACKAGE}" == "@happier-dev/stack@latest" ]]; then
+      hstack_default="stable"
+    else
+      hstack_default="custom"
+    fi
+  else
+    if [[ "${HAPPIER_PVE_HSTACK_CHANNEL}" == "preview" ]]; then
+      hstack_default="preview"
+    fi
+  fi
+
+  HAPPIER_PVE_HSTACK_CHANNEL=$(
+    whiptail --backtitle "$BACKTITLE" --title "HSTACK RELEASE CHANNEL" --radiolist \
+      "\nChoose which HStack release channel to install via npm:\n\n- stable: @happier-dev/stack@latest\n- preview: @happier-dev/stack@preview\n- custom: pin a version or use another spec\n" 18 72 3 \
+      "stable" "Stable (recommended)  (@happier-dev/stack@latest)" $([[ "$hstack_default" == "stable" ]] && echo ON || echo OFF) \
+      "preview" "Preview / pre-release (@happier-dev/stack@preview)" $([[ "$hstack_default" == "preview" ]] && echo ON || echo OFF) \
+      "custom" "Custom (version or package spec)" $([[ "$hstack_default" == "custom" ]] && echo ON || echo OFF) \
+      3>&1 1>&2 2>&3
+  ) || exit_script
+
+  if [[ "${HAPPIER_PVE_HSTACK_CHANNEL}" == "stable" ]]; then
+    HAPPIER_PVE_HSTACK_PACKAGE="@happier-dev/stack@latest"
+  elif [[ "${HAPPIER_PVE_HSTACK_CHANNEL}" == "preview" ]]; then
+    HAPPIER_PVE_HSTACK_PACKAGE="@happier-dev/stack@preview"
+  else
+    local default_pkg="${HAPPIER_PVE_HSTACK_PACKAGE:-@happier-dev/stack@latest}"
+    HAPPIER_PVE_HSTACK_PACKAGE=$(
+      whiptail --backtitle "$BACKTITLE" --title "CUSTOM HSTACK PACKAGE" --inputbox \
+        "\nEnter the npm package spec to install (examples):\n\n  @happier-dev/stack@1.2.3\n  @happier-dev/stack@latest\n  @happier-dev/stack@preview\n\nThis will be used as: npx -p <spec> hstack setup\n" 18 72 \
+        "${default_pkg}" \
+        3>&1 1>&2 2>&3
+    ) || exit_script
+    HAPPIER_PVE_HSTACK_PACKAGE="$(echo "${HAPPIER_PVE_HSTACK_PACKAGE}" | xargs)"
+    if [[ -z "${HAPPIER_PVE_HSTACK_PACKAGE}" ]]; then
+      msg_error "Custom HStack package spec cannot be empty."
+      exit_script
+    fi
+  fi
+
   export HAPPIER_PVE_INSTALL_TYPE
   export HAPPIER_PVE_SERVE_UI
   export HAPPIER_PVE_AUTOSTART
   export HAPPIER_PVE_REMOTE_ACCESS
   export HAPPIER_PVE_TAILSCALE_AUTHKEY
   export HAPPIER_PVE_PUBLIC_URL
+  export HAPPIER_PVE_HSTACK_CHANNEL
+  export HAPPIER_PVE_HSTACK_PACKAGE
 }
 
 if command -v pveversion >/dev/null 2>&1; then

@@ -45,6 +45,8 @@ AUTOSTART="${HAPPIER_PVE_AUTOSTART:-1}"                # 1 | 0
 REMOTE_ACCESS="${HAPPIER_PVE_REMOTE_ACCESS:-none}"     # none | proxy | tailscale
 TAILSCALE_AUTHKEY="${HAPPIER_PVE_TAILSCALE_AUTHKEY:-}" # optional
 PUBLIC_URL_RAW="${HAPPIER_PVE_PUBLIC_URL:-}"           # required when REMOTE_ACCESS=proxy
+HSTACK_CHANNEL_RAW="${HAPPIER_PVE_HSTACK_CHANNEL:-stable}"     # stable | preview | custom
+HSTACK_PACKAGE_RAW="${HAPPIER_PVE_HSTACK_PACKAGE:-}"           # e.g. @happier-dev/stack@latest
 TAILSCALE_ENABLE_SERVE="0"
 TAILSCALE_HTTPS_URL=""
 TAILSCALE_NEEDS_LOGIN="0"
@@ -68,6 +70,21 @@ if [[ "${REMOTE_ACCESS}" == "proxy" ]]; then
     msg_error "HAPPIER_PVE_PUBLIC_URL must start with https:// (got: ${PUBLIC_URL})"
     exit 1
   fi
+fi
+
+HSTACK_CHANNEL="$(printf '%s' "${HSTACK_CHANNEL_RAW}" | tr -d '\r' | xargs | tr '[:upper:]' '[:lower:]')"
+HSTACK_PACKAGE="$(printf '%s' "${HSTACK_PACKAGE_RAW}" | tr -d '\r' | xargs)"
+if [[ -z "${HSTACK_PACKAGE}" ]]; then
+  if [[ "${HSTACK_CHANNEL}" == "preview" ]]; then
+    HSTACK_PACKAGE="@happier-dev/stack@preview"
+  else
+    # stable/default
+    HSTACK_PACKAGE="@happier-dev/stack@latest"
+  fi
+fi
+if [[ -z "${HSTACK_PACKAGE}" ]]; then
+  msg_error "HStack package spec is empty. Set HAPPIER_PVE_HSTACK_PACKAGE or HAPPIER_PVE_HSTACK_CHANNEL."
+  exit 1
 fi
 
 msg_info "Installing Dependencies"
@@ -133,8 +150,9 @@ msg_info "Installing Happier (hstack setup)"
 (
   # Avoid sudo inheriting an inaccessible cwd (e.g. /root) for the happier user.
   cd /home/happier
+  msg_info "Using HStack npm package: ${HSTACK_PACKAGE}"
   sudo -u happier -H env "${SETUP_ENV[@]}" \
-    npx --yes -p @happier-dev/stack@latest hstack setup "${SETUP_ARGS[@]}" </dev/null
+    npx --yes -p "${HSTACK_PACKAGE}" hstack setup "${SETUP_ARGS[@]}" </dev/null
 )
 msg_ok "Installed Happier (hstack setup)"
 

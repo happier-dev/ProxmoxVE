@@ -39,6 +39,10 @@
         {
             "text": "This script installs the upstream Happier stack via npx (@happier-dev/stack). Review sources before installing.",
             "type": "warning"
+        },
+        {
+            "text": "Optional: choose which HStack channel/version to install by setting HAPPIER_PVE_HSTACK_CHANNEL=stable|preview or HAPPIER_PVE_HSTACK_PACKAGE='@happier-dev/stack@<tag-or-version>'.",
+            "type": "info"
         }
     ]
 }
