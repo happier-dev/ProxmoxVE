@@ -47,6 +47,7 @@ TAILSCALE_AUTHKEY="${HAPPIER_PVE_TAILSCALE_AUTHKEY:-}" # optional
 PUBLIC_URL_RAW="${HAPPIER_PVE_PUBLIC_URL:-}"           # required when REMOTE_ACCESS=proxy
 TAILSCALE_ENABLE_SERVE="0"
 TAILSCALE_HTTPS_URL=""
+TAILSCALE_NEEDS_LOGIN="0"
 
 normalize_url_no_trailing_slash() {
   local v
@@ -244,6 +245,12 @@ resolve_tailscale_https_url_with_retries() {
   return 1
 }
 
+tailscale_status_json_field() {
+  local key="$1"
+  "$TAILSCALE_BIN" status --json 2>/dev/null \
+    | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('${key}',''))" 2>/dev/null || true
+}
+
 set_env_kv "$STACK_ENV_FILE" "HAPPIER_SERVER_HOST" "${SERVER_HOST}"
 set_env_kv "$STACK_ENV_FILE" "HAPPIER_STACK_BIND_MODE" "${SETUP_BIND}"
 if [[ "${INSTALL_TYPE}" == "server_only" ]]; then
@@ -301,11 +308,23 @@ if [[ "${REMOTE_ACCESS}" == "tailscale" ]]; then
 
   if [[ -n "${TAILSCALE_AUTHKEY}" ]]; then
     msg_info "Enrolling Tailscale (pre-auth key)"
-    tailscale up --auth-key="${TAILSCALE_AUTHKEY}" >/dev/null 2>&1 || true
-    if tailscale_wait_until_online 20 2; then
+    TAILSCALE_UP_OUTPUT="$("$TAILSCALE_BIN" up --auth-key="${TAILSCALE_AUTHKEY}" 2>&1 || true)"
+    if tailscale_wait_until_online 90 2; then
       msg_ok "Tailscale enrollment attempted"
     else
-      msg_warn "Tailscale enrollment attempted, but node is not online yet."
+      TAILSCALE_STATE="$(tailscale_status_json_field BackendState)"
+      TAILSCALE_AUTH_URL="$(tailscale_status_json_field AuthURL)"
+      msg_warn "Tailscale enrollment attempted, but node is not online yet (state: ${TAILSCALE_STATE:-unknown})."
+      if [[ -n "${TAILSCALE_AUTH_URL}" ]]; then
+        TAILSCALE_NEEDS_LOGIN="1"
+        msg_warn "Tailscale still needs login. Auth URL: ${TAILSCALE_AUTH_URL}"
+        msg_warn "Your pre-auth key may be expired, one-time and already used, or not reusable."
+      else
+        msg_warn "Check Tailscale networking prerequisites (outbound access and /dev/net/tun availability)."
+      fi
+      if [[ -n "${TAILSCALE_UP_OUTPUT}" ]]; then
+        msg_warn "tailscale up output: $(printf '%s' "${TAILSCALE_UP_OUTPUT}" | tail -n 1)"
+      fi
     fi
     TAILSCALE_ENABLE_SERVE="1"
   fi
@@ -338,18 +357,24 @@ if [[ "${REMOTE_ACCESS}" == "tailscale" && "${TAILSCALE_ENABLE_SERVE}" == "1" ]]
 
   # On fresh nodes, cert/DNS readiness can lag behind tailscale up by ~1-2 minutes.
   # Keep retrying serve mapping before giving up to avoid manual follow-up in most installs.
-  if tailscale_wait_until_online 30 2; then
+  if tailscale_wait_until_online 90 2; then
     "$TAILSCALE_BIN" serve reset >/dev/null 2>&1 || true
-    for _ in $(seq 1 30); do
+    for _ in $(seq 1 45); do
       "$TAILSCALE_BIN" serve --bg http://127.0.0.1:3005 >/dev/null 2>&1 || true
       TAILSCALE_HTTPS_URL="$(resolve_tailscale_https_url_with_retries 2 1 || true)"
       if [[ -n "${TAILSCALE_HTTPS_URL}" ]]; then
         break
       fi
-      sleep 4
+      sleep 3
     done
   else
-    msg_warn "Tailscale is not online yet; skipping automatic Serve URL detection."
+    TAILSCALE_STATE="$(tailscale_status_json_field BackendState)"
+    TAILSCALE_AUTH_URL="$(tailscale_status_json_field AuthURL)"
+    msg_warn "Tailscale is not online yet; skipping automatic Serve URL detection (state: ${TAILSCALE_STATE:-unknown})."
+    if [[ -n "${TAILSCALE_AUTH_URL}" ]]; then
+      TAILSCALE_NEEDS_LOGIN="1"
+      msg_warn "Tailscale still needs login. Auth URL: ${TAILSCALE_AUTH_URL}"
+    fi
   fi
 
   if [[ -n "${TAILSCALE_HTTPS_URL}" ]]; then
@@ -382,6 +407,9 @@ elif [[ "${REMOTE_ACCESS}" == "tailscale" ]]; then
   if [[ -z "${TAILSCALE_AUTHKEY}" ]]; then
     echo -e "${INFO}${YW} Tailscale:${CL} enroll it inside the container, then enable Serve:"
     echo -e "${TAB}${GATEWAY}${BGN}tailscale up${CL}"
+    if [[ "${TAILSCALE_NEEDS_LOGIN}" == "1" ]]; then
+      echo -e "${TAB}${YW}A login URL may have been printed above in warnings.${CL}"
+    fi
     echo -e "${TAB}${GATEWAY}${BGN}su - happier -c \"${HSTACK_BIN} tailscale enable\"${CL}"
     echo -e "${TAB}${GATEWAY}${BGN}su - happier -c \"${HSTACK_BIN} tailscale url\"${CL}"
   elif [[ "${TAILSCALE_ENABLE_SERVE}" == "1" ]]; then
