@@ -48,6 +48,7 @@ PUBLIC_URL_RAW="${HAPPIER_PVE_PUBLIC_URL:-}"           # required when REMOTE_AC
 TAILSCALE_ENABLE_SERVE="0"
 TAILSCALE_HTTPS_URL=""
 TAILSCALE_NEEDS_LOGIN="0"
+TAILSCALE_AUTH_INVALID="0"
 
 normalize_url_no_trailing_slash() {
   local v
@@ -312,8 +313,15 @@ if [[ "${REMOTE_ACCESS}" == "tailscale" ]]; then
     msg_info "Enrolling Tailscale (pre-auth key)"
     TAILSCALE_UP_OUTPUT="$("$TAILSCALE_BIN" up --auth-key="${TAILSCALE_AUTHKEY}" 2>&1 || true)"
     "$TAILSCALE_BIN" set --operator=happier >/dev/null 2>&1 || true
-    if tailscale_wait_until_online 90 2; then
+    if printf '%s' "${TAILSCALE_UP_OUTPUT}" | grep -Eiq 'invalid key|not valid|expired|unauthorized'; then
+      TAILSCALE_AUTH_INVALID="1"
+      TAILSCALE_NEEDS_LOGIN="1"
+      msg_warn "Tailscale auth key was rejected."
+      msg_warn "tailscale up output: $(printf '%s' "${TAILSCALE_UP_OUTPUT}" | tail -n 1)"
+      msg_warn "Use a fresh reusable pre-auth key, or run tailscale up manually after install."
+    elif tailscale_wait_until_online 90 2; then
       msg_ok "Tailscale enrollment attempted"
+      TAILSCALE_ENABLE_SERVE="1"
     else
       TAILSCALE_STATE="$(tailscale_status_json_field BackendState)"
       TAILSCALE_AUTH_URL="$(tailscale_status_json_field AuthURL)"
@@ -329,7 +337,6 @@ if [[ "${REMOTE_ACCESS}" == "tailscale" ]]; then
         msg_warn "tailscale up output: $(printf '%s' "${TAILSCALE_UP_OUTPUT}" | tail -n 1)"
       fi
     fi
-    TAILSCALE_ENABLE_SERVE="1"
   fi
 fi
 
@@ -388,6 +395,14 @@ if [[ "${REMOTE_ACCESS}" == "tailscale" && "${TAILSCALE_ENABLE_SERVE}" == "1" ]]
   else
     msg_ok "Tailscale Serve attempted (no HTTPS URL detected yet)"
   fi
+elif [[ "${REMOTE_ACCESS}" == "tailscale" ]]; then
+  if [[ "${TAILSCALE_AUTH_INVALID}" == "1" ]]; then
+    msg_warn "Skipping Tailscale Serve setup: auth key was invalid."
+  elif [[ "${TAILSCALE_NEEDS_LOGIN}" == "1" ]]; then
+    msg_warn "Skipping Tailscale Serve setup: tailscale login is still required."
+  else
+    msg_warn "Skipping Tailscale Serve setup: tailscale is not online."
+  fi
 fi
 
 msg_ok "Install complete"
@@ -407,7 +422,14 @@ fi
 if [[ -n "${TAILSCALE_HTTPS_URL}" ]]; then
   echo -e "${INFO}${YW} Access (HTTPS): ${CL}${TAB}${GATEWAY}${BGN}${TAILSCALE_HTTPS_URL}${CL}"
 elif [[ "${REMOTE_ACCESS}" == "tailscale" ]]; then
-  if [[ -z "${TAILSCALE_AUTHKEY}" ]]; then
+  if [[ "${TAILSCALE_AUTH_INVALID}" == "1" ]]; then
+    echo -e "${INFO}${YW} Tailscale auth failed:${CL} provided pre-auth key was rejected."
+    echo -e "${TAB}${YW}Fix:${CL} provide a valid reusable auth key, or run manual login:"
+    echo -e "${TAB}${GATEWAY}${BGN}tailscale up${CL}"
+    echo -e "${TAB}${GATEWAY}${BGN}tailscale set --operator=happier${CL}"
+    echo -e "${TAB}${GATEWAY}${BGN}tailscale serve --bg http://127.0.0.1:3005${CL}"
+    echo -e "${TAB}${GATEWAY}${BGN}su - happier -c \"${HSTACK_BIN} tailscale url\"${CL}"
+  elif [[ -z "${TAILSCALE_AUTHKEY}" || "${TAILSCALE_NEEDS_LOGIN}" == "1" ]]; then
     echo -e "${INFO}${YW} Tailscale:${CL} enroll it inside the container, then enable Serve:"
     echo -e "${TAB}${GATEWAY}${BGN}tailscale up${CL}"
     if [[ "${TAILSCALE_NEEDS_LOGIN}" == "1" ]]; then
