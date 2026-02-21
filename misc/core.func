@@ -1448,9 +1448,10 @@ cleanup_lxc() {
     $STD apk cache clean || true
     rm -rf /var/cache/apk/*
   else
-    $STD apt -y autoremove 2>/dev/null || msg_warn "apt autoremove failed (non-critical)"
-    $STD apt -y autoclean 2>/dev/null || msg_warn "apt autoclean failed (non-critical)"
-    $STD apt -y clean 2>/dev/null || msg_warn "apt clean failed (non-critical)"
+    # Avoid indefinite hangs if apt/dpkg locks are held by background timers.
+    $STD DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=60 -y autoremove 2>/dev/null || msg_warn "apt autoremove failed (non-critical)"
+    $STD DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=60 -y autoclean 2>/dev/null || msg_warn "apt autoclean failed (non-critical)"
+    $STD DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=60 -y clean 2>/dev/null || msg_warn "apt clean failed (non-critical)"
   fi
 
   find /tmp /var/tmp -type f -name 'tmp*' -delete 2>/dev/null || true

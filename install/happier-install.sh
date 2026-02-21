@@ -47,6 +47,8 @@ TAILSCALE_AUTHKEY="${HAPPIER_PVE_TAILSCALE_AUTHKEY:-}" # optional
 PUBLIC_URL_RAW="${HAPPIER_PVE_PUBLIC_URL:-}"           # required when REMOTE_ACCESS=proxy
 TAILSCALE_ENABLE_SERVE="0"
 TAILSCALE_HTTPS_URL=""
+TAILSCALE_NEEDS_LOGIN="0"
+TAILSCALE_AUTH_INVALID="0"
 
 normalize_url_no_trailing_slash() {
   local v
@@ -106,6 +108,8 @@ fi
 SETUP_ENV=()
 SETUP_ENV+=("HAPPIER_SERVER_HOST=${SERVER_HOST}")
 SETUP_ENV+=("HAPPIER_STACK_BIND_MODE=${SETUP_BIND}")
+# redis-memory-server postinstall can fail in unprivileged LXC; not required for production runtime.
+SETUP_ENV+=("REDISMS_DISABLE_POSTINSTALL=true")
 if [[ "${INSTALL_TYPE}" == "server_only" ]]; then
   SETUP_ENV+=("HAPPIER_STACK_DAEMON=0")
 fi
@@ -126,11 +130,45 @@ if [[ "${SERVE_UI}" != "1" ]]; then
 fi
 
 msg_info "Installing Happier (hstack setup)"
-sudo -u happier -H env "${SETUP_ENV[@]}" \
-  npx --yes -p @happier-dev/stack@latest hstack setup "${SETUP_ARGS[@]}" </dev/null
+(
+  # Avoid sudo inheriting an inaccessible cwd (e.g. /root) for the happier user.
+  cd /home/happier
+  sudo -u happier -H env "${SETUP_ENV[@]}" \
+    npx --yes -p @happier-dev/stack@latest hstack setup "${SETUP_ARGS[@]}" </dev/null
+)
 msg_ok "Installed Happier (hstack setup)"
 
-STACK_ENV_FILE="/home/happier/.happier/stacks/main/env"
+# Resolve actual hstack binary and paths. Some setups may not use the default stack/workdir.
+HSTACK_BIN="/home/happier/.happier-stack/bin/hstack"
+if [[ ! -x "$HSTACK_BIN" ]]; then
+  HSTACK_BIN="$(sudo -u happier -H bash -lc 'command -v hstack || true' | tr -d '\r')"
+fi
+if [[ -z "$HSTACK_BIN" || ! -x "$HSTACK_BIN" ]]; then
+  msg_error "hstack binary not found after setup."
+  exit 1
+fi
+
+HSTACK_HOME_DIR="/home/happier/.happier-stack"
+STACK_NAME="main"
+STACK_LABEL="dev.happier.stack"
+STACK_ENV_FILE="/home/happier/.happier/stacks/${STACK_NAME}/env"
+HSTACK_WHERE_JSON="$(sudo -u happier -H "$HSTACK_BIN" where --json 2>/dev/null || true)"
+if [[ -n "$HSTACK_WHERE_JSON" ]] && command -v jq >/dev/null 2>&1; then
+  _home_dir="$(printf '%s' "$HSTACK_WHERE_JSON" | jq -r '.homeDir // empty' 2>/dev/null || true)"
+  _stack_name="$(printf '%s' "$HSTACK_WHERE_JSON" | jq -r '.stack.name // empty' 2>/dev/null || true)"
+  _stack_label="$(printf '%s' "$HSTACK_WHERE_JSON" | jq -r '.stack.label // empty' 2>/dev/null || true)"
+  _stack_env="$(printf '%s' "$HSTACK_WHERE_JSON" | jq -r '.envFiles.main.path // empty' 2>/dev/null || true)"
+  [[ -n "$_home_dir" ]] && HSTACK_HOME_DIR="$_home_dir"
+  [[ -n "$_stack_name" ]] && STACK_NAME="$_stack_name"
+  [[ -n "$_stack_label" ]] && STACK_LABEL="$_stack_label"
+  [[ -n "$_stack_env" ]] && STACK_ENV_FILE="$_stack_env"
+fi
+if [[ ! -f "$STACK_ENV_FILE" ]]; then
+  _fallback_env="$(find /home/happier/.happier/stacks -mindepth 2 -maxdepth 2 -type f -name env 2>/dev/null | head -n 1 || true)"
+  [[ -n "$_fallback_env" ]] && STACK_ENV_FILE="$_fallback_env"
+fi
+HAPPIER_HOME="$(getent passwd happier | cut -d: -f6 | tr -d '\r' || true)"
+[[ -z "$HAPPIER_HOME" ]] && HAPPIER_HOME="/home/happier"
 mkdir -p "$(dirname "$STACK_ENV_FILE")"
 touch "$STACK_ENV_FILE"
 chown happier:happier "$STACK_ENV_FILE"
@@ -144,6 +182,74 @@ set_env_kv() {
   else
     printf '%s=%s\n' "$key" "$value" >>"$file"
   fi
+}
+
+extract_https_url_from_text() {
+  awk '
+    {
+      for (i = 1; i <= NF; i++) {
+        if ($i ~ /^https:\/\//) {
+          gsub(/\r/, "", $i)
+          print $i
+          exit
+        }
+      }
+    }
+  '
+}
+
+tailscale_wait_until_online() {
+  local attempts="${1:-20}"
+  local sleep_s="${2:-2}"
+  local i=1
+  while (( i <= attempts )); do
+    if "$TAILSCALE_BIN" ip -4 >/dev/null 2>&1 || "$TAILSCALE_BIN" ip -6 >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep "$sleep_s"
+    i=$((i + 1))
+  done
+  return 1
+}
+
+detect_tailscale_https_url() {
+  local detected=""
+  detected="$(sudo -u happier -H "$HSTACK_BIN" tailscale url 2>/dev/null | extract_https_url_from_text || true)"
+  if [[ "$detected" == https://* ]]; then
+    printf '%s' "$detected"
+    return 0
+  fi
+
+  detected="$("$TAILSCALE_BIN" serve status 2>/dev/null | extract_https_url_from_text || true)"
+  if [[ "$detected" == https://* ]]; then
+    printf '%s' "$detected"
+    return 0
+  fi
+
+  return 1
+}
+
+resolve_tailscale_https_url_with_retries() {
+  local attempts="${1:-10}"
+  local sleep_s="${2:-2}"
+  local i=1
+  local detected=""
+  while (( i <= attempts )); do
+    detected="$(detect_tailscale_https_url || true)"
+    if [[ "$detected" == https://* ]]; then
+      printf '%s' "$detected"
+      return 0
+    fi
+    sleep "$sleep_s"
+    i=$((i + 1))
+  done
+  return 1
+}
+
+tailscale_status_json_field() {
+  local key="$1"
+  "$TAILSCALE_BIN" status --json 2>/dev/null \
+    | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('${key}',''))" 2>/dev/null || true
 }
 
 set_env_kv "$STACK_ENV_FILE" "HAPPIER_SERVER_HOST" "${SERVER_HOST}"
@@ -168,7 +274,7 @@ fi
 
 if [[ "${SERVE_UI}" == "1" ]]; then
   msg_info "Building Happier web UI (required to serve UI)"
-  sudo -u happier -H /home/happier/.happier-stack/bin/hstack build --no-tauri </dev/null
+  sudo -u happier -H "$HSTACK_BIN" build --no-tauri </dev/null
   msg_ok "Built Happier web UI"
 fi
 
@@ -177,7 +283,7 @@ if [[ "${AUTOSTART}" != "1" ]]; then
   mkdir -p /home/happier/.happier/logs
   chown -R happier:happier /home/happier/.happier/logs
   sudo -u happier -H bash -lc "
-    HAPPIER_NO_BROWSER_OPEN=1 nohup /home/happier/.happier-stack/bin/hstack start --restart </dev/null >/home/happier/.happier/logs/hstack-start.out.log 2>&1 &
+    HAPPIER_NO_BROWSER_OPEN=1 nohup \"$HSTACK_BIN\" start --restart </dev/null >/home/happier/.happier/logs/hstack-start.out.log 2>&1 &
   "
   msg_ok "Started Happier"
 fi
@@ -195,27 +301,92 @@ if [[ "${REMOTE_ACCESS}" == "tailscale" ]]; then
   systemctl enable -q --now tailscaled
   msg_ok "Installed Tailscale"
 
+  # Pin the binary path to avoid shell/MOTD output polluting command-path resolution.
+  TAILSCALE_BIN="$(command -v tailscale 2>/dev/null || true)"
+  [[ -z "$TAILSCALE_BIN" ]] && TAILSCALE_BIN="/usr/bin/tailscale"
+  set_env_kv "$STACK_ENV_FILE" "HAPPIER_STACK_TAILSCALE_BIN" "$TAILSCALE_BIN"
+  set_env_kv "$STACK_ENV_FILE" "HAPPIER_STACK_TAILSCALE_SERVE" "1"
+  # hstack runs as the happier user; make it an approved tailscale operator.
+  "$TAILSCALE_BIN" set --operator=happier >/dev/null 2>&1 || msg_warn "Could not set tailscale operator to happier (continuing)."
+
   if [[ -n "${TAILSCALE_AUTHKEY}" ]]; then
     msg_info "Enrolling Tailscale (pre-auth key)"
-    tailscale up --auth-key="${TAILSCALE_AUTHKEY}" >/dev/null 2>&1 || true
-    msg_ok "Tailscale enrollment attempted"
-    TAILSCALE_ENABLE_SERVE="1"
+    TAILSCALE_UP_OUTPUT="$("$TAILSCALE_BIN" up --auth-key="${TAILSCALE_AUTHKEY}" 2>&1 || true)"
+    "$TAILSCALE_BIN" set --operator=happier >/dev/null 2>&1 || true
+    if printf '%s' "${TAILSCALE_UP_OUTPUT}" | grep -Eiq 'invalid key|not valid|expired|unauthorized'; then
+      TAILSCALE_AUTH_INVALID="1"
+      TAILSCALE_NEEDS_LOGIN="1"
+      msg_warn "Tailscale auth key was rejected."
+      msg_warn "tailscale up output: $(printf '%s' "${TAILSCALE_UP_OUTPUT}" | tail -n 1)"
+      msg_warn "Use a fresh reusable pre-auth key, or run tailscale up manually after install."
+    elif tailscale_wait_until_online 90 2; then
+      msg_ok "Tailscale enrollment attempted"
+      TAILSCALE_ENABLE_SERVE="1"
+    else
+      TAILSCALE_STATE="$(tailscale_status_json_field BackendState)"
+      TAILSCALE_AUTH_URL="$(tailscale_status_json_field AuthURL)"
+      msg_warn "Tailscale enrollment attempted, but node is not online yet (state: ${TAILSCALE_STATE:-unknown})."
+      if [[ -n "${TAILSCALE_AUTH_URL}" ]]; then
+        TAILSCALE_NEEDS_LOGIN="1"
+        msg_warn "Tailscale still needs login. Auth URL: ${TAILSCALE_AUTH_URL}"
+        msg_warn "Your pre-auth key may be expired, one-time and already used, or not reusable."
+      else
+        msg_warn "Check Tailscale networking prerequisites (outbound access and /dev/net/tun availability)."
+      fi
+      if [[ -n "${TAILSCALE_UP_OUTPUT}" ]]; then
+        msg_warn "tailscale up output: $(printf '%s' "${TAILSCALE_UP_OUTPUT}" | tail -n 1)"
+      fi
+    fi
   fi
 fi
 
 if [[ "${AUTOSTART}" == "1" ]]; then
   msg_info "Enabling autostart (systemd system service)"
-  HOME=/home/happier \
-  HAPPIER_STACK_HOME_DIR=/home/happier/.happier-stack \
-  HAPPIER_STACK_ENV_FILE=/home/happier/.happier/stacks/main/env \
-  /home/happier/.happier-stack/bin/hstack service install --mode=system --system-user=happier
+  HOME="${HAPPIER_HOME}" \
+  HAPPIER_STACK_HOME_DIR="${HSTACK_HOME_DIR}" \
+  HAPPIER_STACK_ENV_FILE="${STACK_ENV_FILE}" \
+  "$HSTACK_BIN" service install --mode=system --system-user=happier
+
+  # hstack currently writes WorkingDirectory=%h for system services.
+  # For system units this can resolve to /root; force the explicit happier home.
+  SYSTEMD_UNIT_PATH="/etc/systemd/system/${STACK_LABEL}.service"
+  if [[ -f "$SYSTEMD_UNIT_PATH" ]]; then
+    sed -i "s|^WorkingDirectory=.*|WorkingDirectory=${HAPPIER_HOME}|" "$SYSTEMD_UNIT_PATH"
+    if ! grep -q '^User=happier$' "$SYSTEMD_UNIT_PATH"; then
+      sed -i '/^\[Service\]/a User=happier' "$SYSTEMD_UNIT_PATH"
+    fi
+    systemctl daemon-reload >/dev/null 2>&1 || true
+    systemctl restart "${STACK_LABEL}.service" >/dev/null 2>&1 || true
+  fi
   msg_ok "Autostart enabled"
 fi
 
 if [[ "${REMOTE_ACCESS}" == "tailscale" && "${TAILSCALE_ENABLE_SERVE}" == "1" ]]; then
   msg_info "Enabling Tailscale Serve (best-effort)"
-  sudo -u happier -H /home/happier/.happier-stack/bin/hstack tailscale enable >/dev/null 2>&1 || true
-  TAILSCALE_HTTPS_URL="$(sudo -u happier -H /home/happier/.happier-stack/bin/hstack tailscale url 2>/dev/null | tail -n 1 | tr -d '\r' || true)"
+  sudo -u happier -H "$HSTACK_BIN" tailscale enable >/dev/null 2>&1 || true
+
+  # On fresh nodes, cert/DNS readiness can lag behind tailscale up by ~1-2 minutes.
+  # Keep retrying serve mapping before giving up to avoid manual follow-up in most installs.
+  if tailscale_wait_until_online 90 2; then
+    "$TAILSCALE_BIN" serve reset >/dev/null 2>&1 || true
+    for _ in $(seq 1 45); do
+      "$TAILSCALE_BIN" serve --bg http://127.0.0.1:3005 >/dev/null 2>&1 || true
+      TAILSCALE_HTTPS_URL="$(resolve_tailscale_https_url_with_retries 2 1 || true)"
+      if [[ -n "${TAILSCALE_HTTPS_URL}" ]]; then
+        break
+      fi
+      sleep 3
+    done
+  else
+    TAILSCALE_STATE="$(tailscale_status_json_field BackendState)"
+    TAILSCALE_AUTH_URL="$(tailscale_status_json_field AuthURL)"
+    msg_warn "Tailscale is not online yet; skipping automatic Serve URL detection (state: ${TAILSCALE_STATE:-unknown})."
+    if [[ -n "${TAILSCALE_AUTH_URL}" ]]; then
+      TAILSCALE_NEEDS_LOGIN="1"
+      msg_warn "Tailscale still needs login. Auth URL: ${TAILSCALE_AUTH_URL}"
+    fi
+  fi
+
   if [[ -n "${TAILSCALE_HTTPS_URL}" ]]; then
     set_env_kv "$STACK_ENV_FILE" "HAPPIER_STACK_SERVER_URL" "${TAILSCALE_HTTPS_URL}"
   fi
@@ -223,6 +394,14 @@ if [[ "${REMOTE_ACCESS}" == "tailscale" && "${TAILSCALE_ENABLE_SERVE}" == "1" ]]
     msg_ok "Tailscale Serve enabled"
   else
     msg_ok "Tailscale Serve attempted (no HTTPS URL detected yet)"
+  fi
+elif [[ "${REMOTE_ACCESS}" == "tailscale" ]]; then
+  if [[ "${TAILSCALE_AUTH_INVALID}" == "1" ]]; then
+    msg_warn "Skipping Tailscale Serve setup: auth key was invalid."
+  elif [[ "${TAILSCALE_NEEDS_LOGIN}" == "1" ]]; then
+    msg_warn "Skipping Tailscale Serve setup: tailscale login is still required."
+  else
+    msg_warn "Skipping Tailscale Serve setup: tailscale is not online."
   fi
 fi
 
@@ -243,15 +422,29 @@ fi
 if [[ -n "${TAILSCALE_HTTPS_URL}" ]]; then
   echo -e "${INFO}${YW} Access (HTTPS): ${CL}${TAB}${GATEWAY}${BGN}${TAILSCALE_HTTPS_URL}${CL}"
 elif [[ "${REMOTE_ACCESS}" == "tailscale" ]]; then
-  if [[ -z "${TAILSCALE_AUTHKEY}" ]]; then
+  if [[ "${TAILSCALE_AUTH_INVALID}" == "1" ]]; then
+    echo -e "${INFO}${YW} Tailscale auth failed:${CL} provided pre-auth key was rejected."
+    echo -e "${TAB}${YW}Fix:${CL} provide a valid reusable auth key, or run manual login:"
+    echo -e "${TAB}${GATEWAY}${BGN}tailscale up${CL}"
+    echo -e "${TAB}${GATEWAY}${BGN}tailscale set --operator=happier${CL}"
+    echo -e "${TAB}${GATEWAY}${BGN}tailscale serve --bg http://127.0.0.1:3005${CL}"
+    echo -e "${TAB}${GATEWAY}${BGN}su - happier -c \"${HSTACK_BIN} tailscale url\"${CL}"
+  elif [[ -z "${TAILSCALE_AUTHKEY}" || "${TAILSCALE_NEEDS_LOGIN}" == "1" ]]; then
     echo -e "${INFO}${YW} Tailscale:${CL} enroll it inside the container, then enable Serve:"
     echo -e "${TAB}${GATEWAY}${BGN}tailscale up${CL}"
-    echo -e "${TAB}${GATEWAY}${BGN}su - happier -c \"/home/happier/.happier-stack/bin/hstack tailscale enable\"${CL}"
-    echo -e "${TAB}${GATEWAY}${BGN}su - happier -c \"/home/happier/.happier-stack/bin/hstack tailscale url\"${CL}"
+    if [[ "${TAILSCALE_NEEDS_LOGIN}" == "1" ]]; then
+      echo -e "${TAB}${YW}A login URL may have been printed above in warnings.${CL}"
+    fi
+    echo -e "${TAB}${GATEWAY}${BGN}su - happier -c \"${HSTACK_BIN} tailscale enable\"${CL}"
+    echo -e "${TAB}${GATEWAY}${BGN}su - happier -c \"${HSTACK_BIN} tailscale url\"${CL}"
   elif [[ "${TAILSCALE_ENABLE_SERVE}" == "1" ]]; then
     echo -e "${INFO}${YW} Tailscale Serve:${CL} was attempted but no HTTPS URL was detected yet."
     echo -e "${TAB}${YW}Try again in a minute:${CL}"
-    echo -e "${TAB}${GATEWAY}${BGN}su - happier -c \"/home/happier/.happier-stack/bin/hstack tailscale url\"${CL}"
+    echo -e "${TAB}${GATEWAY}${BGN}su - happier -c \"${HSTACK_BIN} tailscale url\"${CL}"
+    echo -e "${TAB}${YW}If still missing, reset/recreate Serve mapping:${CL}"
+    echo -e "${TAB}${GATEWAY}${BGN}tailscale serve reset${CL}"
+    echo -e "${TAB}${GATEWAY}${BGN}tailscale serve --bg http://127.0.0.1:3005${CL}"
+    echo -e "${TAB}${GATEWAY}${BGN}tailscale serve status${CL}"
   fi
 fi
 echo -e "${INFO}${YW} Next steps:${CL}"
@@ -310,18 +503,18 @@ fi
 
 if [[ "${REMOTE_ACCESS}" == "tailscale" && -z "${TAILSCALE_HTTPS_URL}" ]]; then
   echo -e "${TAB}${TAB}${YW}After you have your Tailscale HTTPS URL:${CL} re-run these to get the correct links/QR codes:"
-  echo -e "${TAB}${TAB}${TAB}${GATEWAY}${BGN}su - happier -c \"/home/happier/.happier-stack/bin/hstack tailscale url\"${CL}"
-  echo -e "${TAB}${TAB}${TAB}${GATEWAY}${BGN}su - happier -c \"/home/happier/.happier-stack/bin/hstack auth login --print\"${CL}"
+  echo -e "${TAB}${TAB}${TAB}${GATEWAY}${BGN}su - happier -c \"${HSTACK_BIN} tailscale url\"${CL}"
+  echo -e "${TAB}${TAB}${TAB}${GATEWAY}${BGN}su - happier -c \"${HSTACK_BIN} auth login --print\"${CL}"
 fi
 
 if [[ "${INSTALL_TYPE}" == "devbox" ]]; then
   echo -e "${TAB}${YW}2)${CL} Connect the daemon running in this devbox (run inside the container):"
-  echo -e "${TAB}${TAB}${GATEWAY}${BGN}sudo -u happier -H /home/happier/.happier-stack/bin/hstack auth login --method=mobile --no-open${CL}"
+  echo -e "${TAB}${TAB}${GATEWAY}${BGN}sudo -u happier -H ${HSTACK_BIN} auth login --method=mobile --no-open${CL}"
   echo -e "${TAB}${YW}3)${CL} After login, restart the stack to start the daemon:"
   if [[ "${AUTOSTART}" == "1" ]]; then
-    echo -e "${TAB}${TAB}${GATEWAY}${BGN}sudo -u happier -H /home/happier/.happier-stack/bin/hstack service restart --mode=system${CL}"
+    echo -e "${TAB}${TAB}${GATEWAY}${BGN}sudo -u happier -H ${HSTACK_BIN} service restart --mode=system${CL}"
   else
-    echo -e "${TAB}${TAB}${GATEWAY}${BGN}sudo -u happier -H /home/happier/.happier-stack/bin/hstack start --restart${CL}"
+    echo -e "${TAB}${TAB}${GATEWAY}${BGN}sudo -u happier -H ${HSTACK_BIN} start --restart${CL}"
   fi
 else
   echo -e "${TAB}${YW}2)${CL} To connect a terminal/daemon from your laptop/desktop:"
