@@ -336,12 +336,20 @@ if [[ "${REMOTE_ACCESS}" == "tailscale" && "${TAILSCALE_ENABLE_SERVE}" == "1" ]]
   msg_info "Enabling Tailscale Serve (best-effort)"
   sudo -u happier -H "$HSTACK_BIN" tailscale enable >/dev/null 2>&1 || true
 
-  TAILSCALE_HTTPS_URL="$(resolve_tailscale_https_url_with_retries 8 2 || true)"
-  if [[ -z "${TAILSCALE_HTTPS_URL}" ]]; then
-    msg_info "Falling back to direct tailscale serve mapping"
+  # On fresh nodes, cert/DNS readiness can lag behind tailscale up by ~1-2 minutes.
+  # Keep retrying serve mapping before giving up to avoid manual follow-up in most installs.
+  if tailscale_wait_until_online 30 2; then
     "$TAILSCALE_BIN" serve reset >/dev/null 2>&1 || true
-    "$TAILSCALE_BIN" serve --bg http://127.0.0.1:3005 >/dev/null 2>&1 || true
-    TAILSCALE_HTTPS_URL="$(resolve_tailscale_https_url_with_retries 8 2 || true)"
+    for _ in $(seq 1 30); do
+      "$TAILSCALE_BIN" serve --bg http://127.0.0.1:3005 >/dev/null 2>&1 || true
+      TAILSCALE_HTTPS_URL="$(resolve_tailscale_https_url_with_retries 2 1 || true)"
+      if [[ -n "${TAILSCALE_HTTPS_URL}" ]]; then
+        break
+      fi
+      sleep 4
+    done
+  else
+    msg_warn "Tailscale is not online yet; skipping automatic Serve URL detection."
   fi
 
   if [[ -n "${TAILSCALE_HTTPS_URL}" ]]; then
