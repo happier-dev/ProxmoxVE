@@ -305,10 +305,13 @@ if [[ "${REMOTE_ACCESS}" == "tailscale" ]]; then
   [[ -z "$TAILSCALE_BIN" ]] && TAILSCALE_BIN="/usr/bin/tailscale"
   set_env_kv "$STACK_ENV_FILE" "HAPPIER_STACK_TAILSCALE_BIN" "$TAILSCALE_BIN"
   set_env_kv "$STACK_ENV_FILE" "HAPPIER_STACK_TAILSCALE_SERVE" "1"
+  # hstack runs as the happier user; make it an approved tailscale operator.
+  "$TAILSCALE_BIN" set --operator=happier >/dev/null 2>&1 || msg_warn "Could not set tailscale operator to happier (continuing)."
 
   if [[ -n "${TAILSCALE_AUTHKEY}" ]]; then
     msg_info "Enrolling Tailscale (pre-auth key)"
     TAILSCALE_UP_OUTPUT="$("$TAILSCALE_BIN" up --auth-key="${TAILSCALE_AUTHKEY}" 2>&1 || true)"
+    "$TAILSCALE_BIN" set --operator=happier >/dev/null 2>&1 || true
     if tailscale_wait_until_online 90 2; then
       msg_ok "Tailscale enrollment attempted"
     else
