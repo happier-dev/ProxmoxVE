@@ -613,4 +613,9 @@ fi
 
 motd_ssh
 customize
+
+# customize() creates /usr/bin/update pointing to community-scripts; fix to use the fork.
+echo "bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/happier-dev/ProxmoxVE/main/ct/happier.sh)\"" >/usr/bin/update
+chmod +x /usr/bin/update
+
 cleanup_lxc
