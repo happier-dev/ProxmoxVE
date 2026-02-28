@@ -513,6 +513,7 @@ elif [[ "${REMOTE_ACCESS}" == "tailscale" ]]; then
       echo -e "${TAB}${YW}Login URL:${CL} ${TAILSCALE_AUTH_URL}"
     fi
     echo -e "${TAB}${GATEWAY}${BGN}tailscale up${CL}"
+    echo -e "${TAB}${GATEWAY}${BGN}tailscale set --operator=happier${CL}"
     echo -e "${TAB}${GATEWAY}${BGN}su - happier -c \"${HSTACK_BIN} tailscale enable\"${CL}"
     echo -e "${TAB}${GATEWAY}${BGN}su - happier -c \"${HSTACK_BIN} tailscale url\"${CL}"
   elif [[ "${TAILSCALE_ENABLE_SERVE}" == "1" ]]; then
