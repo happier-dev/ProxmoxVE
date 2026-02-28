@@ -152,12 +152,11 @@ if [[ "${SERVE_UI}" != "1" ]]; then
   SETUP_ARGS+=("--no-ui-deps" "--no-ui-build")
 fi
 
-msg_info "Installing Happier (hstack setup)"
+msg_info "Installing Happier (hstack setup) — package: ${HSTACK_PACKAGE}"
 (
   # Avoid sudo inheriting an inaccessible cwd (e.g. /root) for the happier user.
   cd /home/happier
-  msg_info "Using HStack npm package: ${HSTACK_PACKAGE}"
-  sudo -u happier -H env "${SETUP_ENV[@]}" \
+  $STD sudo -u happier -H env "${SETUP_ENV[@]}" \
     npx --yes -p "${HSTACK_PACKAGE}" hstack setup "${SETUP_ARGS[@]}" </dev/null
 )
 msg_ok "Installed Happier (hstack setup)"
@@ -313,7 +312,7 @@ fi
 
 if [[ "${SERVE_UI}" == "1" ]]; then
   msg_info "Building Happier web UI (required to serve UI)"
-  sudo -u happier -H "$HSTACK_BIN" build --no-tauri </dev/null
+  $STD sudo -u happier -H "$HSTACK_BIN" build --no-tauri </dev/null
   msg_ok "Built Happier web UI"
 fi
 
@@ -410,7 +409,7 @@ fi
 
 if [[ "${AUTOSTART}" == "1" ]]; then
   msg_info "Enabling autostart (systemd system service)"
-  HOME="${HAPPIER_HOME}" \
+  $STD HOME="${HAPPIER_HOME}" \
   HAPPIER_STACK_HOME_DIR="${HSTACK_HOME_DIR}" \
   HAPPIER_STACK_ENV_FILE="${STACK_ENV_FILE}" \
   "$HSTACK_BIN" service install --mode=system --system-user=happier
