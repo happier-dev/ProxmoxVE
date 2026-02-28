@@ -99,6 +99,7 @@ $STD apt-get install -y \
   git \
   build-essential \
   gnupg \
+  jq \
   python3
 msg_ok "Installed Dependencies"
 
@@ -457,6 +458,11 @@ if [[ "${REMOTE_ACCESS}" == "tailscale" && "${TAILSCALE_ENABLE_SERVE}" == "1" ]]
 
   if [[ -n "${TAILSCALE_HTTPS_URL}" ]]; then
     set_env_kv "$STACK_ENV_FILE" "HAPPIER_STACK_SERVER_URL" "${TAILSCALE_HTTPS_URL}"
+    # The service was started earlier without the Tailscale URL; restart so
+    # it picks up the correct HAPPIER_STACK_SERVER_URL for deep links/QR codes.
+    if [[ "${AUTOSTART}" == "1" ]]; then
+      systemctl restart "${STACK_LABEL}.service" >/dev/null 2>&1 || true
+    fi
   fi
   if [[ -n "${TAILSCALE_HTTPS_URL}" ]]; then
     msg_ok "Tailscale Serve enabled"
