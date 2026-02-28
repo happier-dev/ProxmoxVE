@@ -172,21 +172,3 @@ build_container
 description
 
 msg_ok "Completed successfully!\n"
-echo -e "${CREATING}${GN}${APP} setup has been successfully initialized!${CL}"
-if [[ "${HAPPIER_PVE_REMOTE_ACCESS}" == "tailscale" ]]; then
-  echo -e "${INFO}${YW} Access (HTTP, inside container):${CL}"
-  echo -e "${TAB}${GATEWAY}${BGN}http://127.0.0.1:3005${CL}"
-  echo -e "${INFO}${YW} Note:${CL} bind=loopback is not reachable from your LAN."
-else
-  echo -e "${INFO}${YW} Access (HTTP):${CL}"
-  echo -e "${TAB}${GATEWAY}${BGN}http://${IP}:3005${CL}"
-fi
-if [[ "${HAPPIER_PVE_REMOTE_ACCESS}" == "proxy" && -n "${HAPPIER_PVE_PUBLIC_URL}" ]]; then
-  echo -e "${INFO}${YW} Access (HTTPS):${CL}"
-  echo -e "${TAB}${GATEWAY}${BGN}${HAPPIER_PVE_PUBLIC_URL}${CL}"
-fi
-echo -e "${INFO}${YW} IMPORTANT:${CL} The Happier web UI requires HTTPS for remote access (secure context)."
-if [[ "${HAPPIER_PVE_REMOTE_ACCESS}" == "tailscale" ]]; then
-  echo -e "${TAB}${YW}Tip:${CL} after install, Tailscale should be installed in the container."
-  echo -e "${TAB}${YW}If not enrolled yet:${CL} run 'tailscale up' inside the container."
-fi
