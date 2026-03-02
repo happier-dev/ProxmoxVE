@@ -356,18 +356,20 @@ if [[ "${REMOTE_ACCESS}" == "tailscale" ]]; then
     TAILSCALE_UP_EXIT=0
     TAILSCALE_UP_ARGS=(up "--authkey=${TAILSCALE_AUTHKEY}")
     if command -v timeout >/dev/null 2>&1; then
-      set +e
-      TAILSCALE_UP_OUTPUT="$(timeout 120 "$TAILSCALE_BIN" "${TAILSCALE_UP_ARGS[@]}" 2>&1)"
-      TAILSCALE_UP_EXIT=$?
-      set -e
+      if TAILSCALE_UP_OUTPUT="$(timeout 120 "$TAILSCALE_BIN" "${TAILSCALE_UP_ARGS[@]}" 2>&1)"; then
+        TAILSCALE_UP_EXIT=0
+      else
+        TAILSCALE_UP_EXIT=$?
+      fi
       if [[ $TAILSCALE_UP_EXIT -eq 124 || $TAILSCALE_UP_EXIT -eq 137 ]]; then
         msg_warn "tailscale up timed out. Continuing with manual enrollment instructions."
       fi
     else
-      set +e
-      TAILSCALE_UP_OUTPUT="$("$TAILSCALE_BIN" "${TAILSCALE_UP_ARGS[@]}" 2>&1)"
-      TAILSCALE_UP_EXIT=$?
-      set -e
+      if TAILSCALE_UP_OUTPUT="$("$TAILSCALE_BIN" "${TAILSCALE_UP_ARGS[@]}" 2>&1)"; then
+        TAILSCALE_UP_EXIT=0
+      else
+        TAILSCALE_UP_EXIT=$?
+      fi
     fi
     "$TAILSCALE_BIN" set --operator=happier >/dev/null 2>&1 || true
     if printf '%s' "${TAILSCALE_UP_OUTPUT}" | grep -Eiq 'invalid key|not valid|expired|unauthorized'; then
@@ -409,7 +411,7 @@ fi
 
 if [[ "${AUTOSTART}" == "1" ]]; then
   msg_info "Enabling autostart (systemd system service)"
-  $STD HOME="${HAPPIER_HOME}" \
+  $STD env HOME="${HAPPIER_HOME}" \
   HAPPIER_STACK_HOME_DIR="${HSTACK_HOME_DIR}" \
   HAPPIER_STACK_ENV_FILE="${STACK_ENV_FILE}" \
   "$HSTACK_BIN" service install --mode=system --system-user=happier
