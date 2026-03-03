@@ -42,7 +42,12 @@ function update_script() {
     local channel
     channel="$(jq -r '.channel // "stable"' /opt/happier/self-host-state.json 2>/dev/null || echo stable)"
     msg_info "Updating ${APP} self-host runtime (channel: ${channel})"
-    npx --yes -p @happier-dev/stack@latest hstack self-host update --mode=system --channel="${channel}"
+    if command -v hstack >/dev/null 2>&1; then
+      hstack self-host update --mode=system --channel="${channel}"
+    else
+      msg_error "hstack not found on PATH. Try reinstalling self-host runtime."
+      exit 1
+    fi
     msg_ok "Updated ${APP}"
     exit
   fi

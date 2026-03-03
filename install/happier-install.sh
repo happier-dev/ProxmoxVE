@@ -151,17 +151,19 @@ $STD apt-get install -y \
   python3
 msg_ok "Installed Dependencies"
 
-msg_info "Installing Node.js"
-NODE_VERSION="24" setup_nodejs
-msg_ok "Installed Node.js"
+if [[ "${INSTALL_METHOD}" != "selfhost" ]]; then
+  msg_info "Installing Node.js"
+  NODE_VERSION="24" setup_nodejs
+  msg_ok "Installed Node.js"
 
-msg_info "Enabling Corepack (yarn)"
-if ! command -v corepack >/dev/null 2>&1; then
-  msg_error "corepack not found (required for yarn)."
-  exit 1
+  msg_info "Enabling Corepack (yarn)"
+  if ! command -v corepack >/dev/null 2>&1; then
+    msg_error "corepack not found (required for yarn)."
+    exit 1
+  fi
+  $STD corepack enable
+  msg_ok "Enabled Corepack"
 fi
-$STD corepack enable
-msg_ok "Enabled Corepack"
 
 msg_info "Creating user"
 if ! id happier &>/dev/null; then
@@ -177,6 +179,7 @@ if [[ "${REMOTE_ACCESS}" == "proxy" || "${REMOTE_ACCESS}" == "none" ]]; then
 fi
 
 install_selfhost_runtime() {
+  local selfhost_installer_url="https://happier.dev/self-host"
   extract_https_url_from_text() {
     awk '
       {
@@ -222,12 +225,7 @@ install_selfhost_runtime() {
   local channel="stable"
   if [[ "${HSTACK_CHANNEL}" == "preview" ]]; then
     channel="preview"
-  fi
-
-  # Self-host runtime always installs a system service. If AUTOSTART=0, we disable it after install.
-  local withoutUi=()
-  if [[ "${SERVE_UI}" != "1" ]]; then
-    withoutUi+=("--without-ui")
+    selfhost_installer_url="https://happier.dev/self-host-preview"
   fi
 
   get_lxc_ip
@@ -248,35 +246,34 @@ install_selfhost_runtime() {
     webappUrl="https://app.happier.dev"
   fi
 
-  msg_info "Installing Happier (self-host runtime) — package: ${HSTACK_PACKAGE}"
-  SELFHOST_ARGS=()
-  SELFHOST_ARGS+=("self-host" "install")
-  SELFHOST_ARGS+=("--mode=system")
-  SELFHOST_ARGS+=("--channel=${channel}")
-  SELFHOST_ARGS+=("--non-interactive")
-  SELFHOST_ARGS+=("--no-auto-update")
-  SELFHOST_ARGS+=("--without-cli")
-  SELFHOST_ARGS+=("${withoutUi[@]}")
-  SELFHOST_ARGS+=("--env" "HAPPIER_SERVER_HOST=${SERVER_HOST}")
-  SELFHOST_ARGS+=("--env" "HAPPIER_SERVER_PORT=3005")
-  if [[ -n "${publicServerUrl}" ]]; then
-    SELFHOST_ARGS+=("--env" "HAPPIER_PUBLIC_SERVER_URL=${publicServerUrl}")
-  fi
-  if [[ -n "${webappUrl}" ]]; then
-    SELFHOST_ARGS+=("--env" "HAPPIER_WEBAPP_URL=${webappUrl}")
-  fi
-  $STD npx --yes -p "${HSTACK_PACKAGE}" hstack "${SELFHOST_ARGS[@]}" </dev/null
+  msg_info "Installing Happier (self-host runtime) — channel: ${channel}"
+  HAPPIER_CHANNEL="${channel}" \
+    HAPPIER_WITH_CLI=0 \
+    HAPPIER_WITH_UI="$([[ "${SERVE_UI}" == "1" ]] && echo 1 || echo 0)" \
+    HAPPIER_NONINTERACTIVE=1 \
+    HAPPIER_SERVER_HOST="${SERVER_HOST}" \
+    HAPPIER_SERVER_PORT="3005" \
+    curl -fsSL "${selfhost_installer_url}" | $STD bash -s -- --mode system --channel "${channel}"
   msg_ok "Installed Happier (self-host runtime)"
 
   # In self-host runtime system mode, the env file is canonical at /etc/happier/server.env.
   local serverEnvFile="/etc/happier/server.env"
-  if [[ -f "${serverEnvFile}" ]]; then
-    if [[ -n "${publicServerUrl}" ]]; then
-      set_env_kv_simple "${serverEnvFile}" "HAPPIER_PUBLIC_SERVER_URL" "${publicServerUrl}"
+  if command -v hstack >/dev/null 2>&1; then
+    if [[ -n "${publicServerUrl}" || -n "${webappUrl}" ]]; then
+      msg_info "Writing self-host env overrides"
+      CONFIG_ARGS=(self-host config set --mode=system --channel="${channel}" --no-apply)
+      [[ -n "${publicServerUrl}" ]] && CONFIG_ARGS+=(--env "HAPPIER_PUBLIC_SERVER_URL=${publicServerUrl}")
+      [[ -n "${webappUrl}" ]] && CONFIG_ARGS+=(--env "HAPPIER_WEBAPP_URL=${webappUrl}")
+      $STD hstack "${CONFIG_ARGS[@]}" </dev/null
+      if command -v systemctl >/dev/null 2>&1; then
+        systemctl restart happier-server >/dev/null 2>&1 || true
+      fi
+      msg_ok "Self-host env overrides written"
     fi
-    if [[ -n "${webappUrl}" ]]; then
-      set_env_kv_simple "${serverEnvFile}" "HAPPIER_WEBAPP_URL" "${webappUrl}"
-    fi
+  elif [[ -f "${serverEnvFile}" ]]; then
+    # Back-compat fallback if hstack is not on PATH for some reason.
+    [[ -n "${publicServerUrl}" ]] && set_env_kv_simple "${serverEnvFile}" "HAPPIER_PUBLIC_SERVER_URL" "${publicServerUrl}"
+    [[ -n "${webappUrl}" ]] && set_env_kv_simple "${serverEnvFile}" "HAPPIER_WEBAPP_URL" "${webappUrl}"
   fi
 
   if [[ "${REMOTE_ACCESS}" == "tailscale" ]]; then
