@@ -46,6 +46,7 @@ INSTALL_TYPE="${HAPPIER_PVE_INSTALL_TYPE:-devbox}"      # devbox | server_only
 SERVE_UI="${HAPPIER_PVE_SERVE_UI:-1}"                  # 1 | 0
 AUTOSTART="${HAPPIER_PVE_AUTOSTART:-1}"                # 1 | 0
 REMOTE_ACCESS="${HAPPIER_PVE_REMOTE_ACCESS:-none}"     # none | proxy | tailscale
+INSTALL_METHOD_RAW="${HAPPIER_PVE_INSTALL_METHOD:-auto}" # auto | legacy | selfhost
 TAILSCALE_AUTHKEY="${HAPPIER_PVE_TAILSCALE_AUTHKEY:-}" # optional
 PUBLIC_URL_RAW="${HAPPIER_PVE_PUBLIC_URL:-}"           # required when REMOTE_ACCESS=proxy
 HSTACK_CHANNEL_RAW="${HAPPIER_PVE_HSTACK_CHANNEL:-stable}"     # stable | preview | custom
@@ -91,6 +92,19 @@ out = f"https://{host}{port}{path}".rstrip("/")
 print(out, end="")
 PY
 }
+
+INSTALL_METHOD="$(printf '%s' "${INSTALL_METHOD_RAW}" | tr -d '\r' | xargs | tr '[:upper:]' '[:lower:]')"
+if [[ "${INSTALL_METHOD}" == "auto" || -z "${INSTALL_METHOD}" ]]; then
+  # The legacy `hstack setup --profile=selfhost` flow is still required for devbox (daemon-in-container) today.
+  if [[ "${INSTALL_TYPE}" == "server_only" ]]; then
+    INSTALL_METHOD="selfhost"
+  else
+    INSTALL_METHOD="legacy"
+  fi
+fi
+if [[ "${INSTALL_METHOD}" == "self-host" ]]; then
+  INSTALL_METHOD="selfhost"
+fi
 
 PUBLIC_URL="$(normalize_url_no_trailing_slash "$PUBLIC_URL_RAW")"
 if [[ "${REMOTE_ACCESS}" == "proxy" ]]; then
@@ -160,6 +174,269 @@ SERVER_HOST="127.0.0.1"
 if [[ "${REMOTE_ACCESS}" == "proxy" || "${REMOTE_ACCESS}" == "none" ]]; then
   SETUP_BIND="lan"
   SERVER_HOST="0.0.0.0"
+fi
+
+install_selfhost_runtime() {
+  extract_https_url_from_text() {
+    awk '
+      {
+        for (i = 1; i <= NF; i++) {
+          if ($i ~ /^https:\/\//) {
+            gsub(/\r/, "", $i)
+            print $i
+            exit
+          }
+        }
+      }
+    '
+  }
+
+  resolve_tailscale_https_url_with_retries() {
+    local attempts="${1:-10}"
+    local sleep_s="${2:-2}"
+    local i=1
+    local detected=""
+    while (( i <= attempts )); do
+      detected="$(tailscale serve status 2>/dev/null | extract_https_url_from_text || true)"
+      if [[ "$detected" == https://* ]]; then
+        normalize_url_no_trailing_slash "$detected"
+        return 0
+      fi
+      sleep "$sleep_s"
+      i=$((i + 1))
+    done
+    return 1
+  }
+
+  set_env_kv_simple() {
+    local file="$1" key="$2" value="$3"
+    local escaped
+    escaped="$(printf '%s' "$value" | sed -e 's/[|&]/\\\\&/g')"
+    if grep -q "^${key}=" "$file"; then
+      sed -i "s|^${key}=.*|${key}=${escaped}|" "$file"
+    else
+      printf '%s=%s\n' "$key" "$value" >>"$file"
+    fi
+  }
+
+  local channel="stable"
+  if [[ "${HSTACK_CHANNEL}" == "preview" ]]; then
+    channel="preview"
+  fi
+
+  # Self-host runtime always installs a system service. If AUTOSTART=0, we disable it after install.
+  local withoutUi=()
+  if [[ "${SERVE_UI}" != "1" ]]; then
+    withoutUi+=("--without-ui")
+  fi
+
+  get_lxc_ip
+  local publicServerUrl=""
+  if [[ "${REMOTE_ACCESS}" == "proxy" ]]; then
+    publicServerUrl="${PUBLIC_URL}"
+  elif [[ "${REMOTE_ACCESS}" == "none" ]]; then
+    publicServerUrl="http://${LOCAL_IP}:3005"
+  fi
+  local webappUrl=""
+  if [[ "${SERVE_UI}" == "1" ]]; then
+    if [[ "${REMOTE_ACCESS}" == "proxy" ]]; then
+      webappUrl="${PUBLIC_URL}"
+    elif [[ "${REMOTE_ACCESS}" == "none" ]]; then
+      webappUrl="http://${LOCAL_IP}:3005"
+    fi
+  else
+    webappUrl="https://app.happier.dev"
+  fi
+
+  msg_info "Installing Happier (self-host runtime) — package: ${HSTACK_PACKAGE}"
+  SELFHOST_ARGS=()
+  SELFHOST_ARGS+=("self-host" "install")
+  SELFHOST_ARGS+=("--mode=system")
+  SELFHOST_ARGS+=("--channel=${channel}")
+  SELFHOST_ARGS+=("--non-interactive")
+  SELFHOST_ARGS+=("--no-auto-update")
+  SELFHOST_ARGS+=("--without-cli")
+  SELFHOST_ARGS+=("${withoutUi[@]}")
+  SELFHOST_ARGS+=("--env" "HAPPIER_SERVER_HOST=${SERVER_HOST}")
+  SELFHOST_ARGS+=("--env" "HAPPIER_SERVER_PORT=3005")
+  if [[ -n "${publicServerUrl}" ]]; then
+    SELFHOST_ARGS+=("--env" "HAPPIER_PUBLIC_SERVER_URL=${publicServerUrl}")
+  fi
+  if [[ -n "${webappUrl}" ]]; then
+    SELFHOST_ARGS+=("--env" "HAPPIER_WEBAPP_URL=${webappUrl}")
+  fi
+  $STD npx --yes -p "${HSTACK_PACKAGE}" hstack "${SELFHOST_ARGS[@]}" </dev/null
+  msg_ok "Installed Happier (self-host runtime)"
+
+  # In self-host runtime system mode, the env file is canonical at /etc/happier/server.env.
+  local serverEnvFile="/etc/happier/server.env"
+  if [[ -f "${serverEnvFile}" ]]; then
+    if [[ -n "${publicServerUrl}" ]]; then
+      set_env_kv_simple "${serverEnvFile}" "HAPPIER_PUBLIC_SERVER_URL" "${publicServerUrl}"
+    fi
+    if [[ -n "${webappUrl}" ]]; then
+      set_env_kv_simple "${serverEnvFile}" "HAPPIER_WEBAPP_URL" "${webappUrl}"
+    fi
+  fi
+
+  if [[ "${REMOTE_ACCESS}" == "tailscale" ]]; then
+    msg_info "Installing Tailscale"
+    ID=$(grep "^ID=" /etc/os-release | cut -d"=" -f2)
+    VER=$(grep "^VERSION_CODENAME=" /etc/os-release | cut -d"=" -f2)
+    curl -fsSL "https://pkgs.tailscale.com/stable/${ID}/${VER}.noarmor.gpg" \
+      | tee /usr/share/keyrings/tailscale-archive-keyring.gpg >/dev/null
+    echo "deb [signed-by=/usr/share/keyrings/tailscale-archive-keyring.gpg] https://pkgs.tailscale.com/stable/${ID} ${VER} main" \
+      >/etc/apt/sources.list.d/tailscale.list
+    $STD apt-get update -qq
+    $STD apt-get install -y tailscale
+    systemctl enable -q --now tailscaled
+    msg_ok "Installed Tailscale"
+
+    if command -v tailscale >/dev/null 2>&1; then
+      tailscale set --operator=happier >/dev/null 2>&1 || true
+    fi
+
+    if [[ -n "${TAILSCALE_AUTHKEY}" ]]; then
+      msg_info "Enrolling Tailscale (pre-auth key)"
+      if command -v timeout >/dev/null 2>&1; then
+        timeout 120 tailscale up --authkey="${TAILSCALE_AUTHKEY}" >/dev/null 2>&1 || true
+      else
+        tailscale up --authkey="${TAILSCALE_AUTHKEY}" >/dev/null 2>&1 || true
+      fi
+      tailscale set --operator=happier >/dev/null 2>&1 || true
+      TAILSCALE_ENABLE_SERVE="1"
+    fi
+
+    if [[ "${TAILSCALE_ENABLE_SERVE}" == "1" ]]; then
+      msg_info "Enabling Tailscale Serve (best-effort)"
+      tailscale serve reset >/dev/null 2>&1 || true
+      tailscale serve --bg http://127.0.0.1:3005 >/dev/null 2>&1 || true
+      TAILSCALE_HTTPS_URL="$(resolve_tailscale_https_url_with_retries 40 3 || true)"
+      if [[ -n "${TAILSCALE_HTTPS_URL}" ]]; then
+        msg_ok "Tailscale Serve enabled"
+        if [[ -f "${serverEnvFile}" ]]; then
+          set_env_kv_simple "${serverEnvFile}" "HAPPIER_PUBLIC_SERVER_URL" "${TAILSCALE_HTTPS_URL}"
+          if [[ "${SERVE_UI}" == "1" ]]; then
+            set_env_kv_simple "${serverEnvFile}" "HAPPIER_WEBAPP_URL" "${TAILSCALE_HTTPS_URL}"
+          fi
+        fi
+      else
+        msg_ok "Tailscale Serve attempted (no HTTPS URL detected yet)"
+      fi
+    fi
+  fi
+
+  if [[ "${AUTOSTART}" != "1" ]]; then
+    msg_info "Disabling autostart (self-host system service)"
+    systemctl disable -q --now happier-server >/dev/null 2>&1 || true
+    msg_ok "Autostart disabled"
+  fi
+}
+
+if [[ "${INSTALL_METHOD}" == "selfhost" ]]; then
+  if [[ "${INSTALL_TYPE}" == "devbox" ]]; then
+    msg_warn "INSTALL_TYPE=devbox currently uses the legacy install method. Set HAPPIER_PVE_INSTALL_TYPE=server_only to use the self-host runtime."
+  else
+    install_selfhost_runtime
+
+    # Post-install output: keep it consistent with the legacy flow (configure server → sign in/create → connect daemon elsewhere).
+    msg_ok "Install complete"
+    if [[ "${SETUP_BIND}" == "loopback" ]]; then
+      echo -e "${INFO}${YW} Access (HTTP, inside container): ${CL}${TAB}${GATEWAY}${BGN}http://127.0.0.1:3005${CL}"
+      echo -e "${INFO}${YW} Note:${CL} bind=loopback is not reachable from your LAN."
+    else
+      echo -e "${INFO}${YW} Access (HTTP): ${CL}${TAB}${GATEWAY}${BGN}http://${LOCAL_IP}:3005${CL}"
+    fi
+    if [[ "${REMOTE_ACCESS}" == "proxy" ]]; then
+      echo -e "${INFO}${YW} Access (HTTPS): ${CL}${TAB}${GATEWAY}${BGN}${PUBLIC_URL}${CL}"
+    else
+      echo -e "${INFO}${YW} IMPORTANT: ${CL}For remote web UI access you need HTTPS (Tailscale Serve or reverse proxy)."
+    fi
+    if [[ -n "${TAILSCALE_HTTPS_URL}" ]]; then
+      echo -e "${INFO}${YW} Access (HTTPS): ${CL}${TAB}${GATEWAY}${BGN}${TAILSCALE_HTTPS_URL}${CL}"
+    elif [[ "${REMOTE_ACCESS}" == "tailscale" ]]; then
+      echo -e "${INFO}${YW} Tailscale:${CL} enroll it inside the container, then enable Serve:"
+      echo -e "${TAB}${GATEWAY}${BGN}tailscale up${CL}"
+      echo -e "${TAB}${GATEWAY}${BGN}tailscale set --operator=happier${CL}"
+      echo -e "${TAB}${GATEWAY}${BGN}tailscale serve --bg http://127.0.0.1:3005${CL}"
+      echo -e "${TAB}${GATEWAY}${BGN}tailscale serve status${CL}"
+    fi
+
+    echo -e "${INFO}${YW} Next steps:${CL}"
+    echo -e "${TAB}${YW}1)${CL} Connect with the mobile app (recommended): scan the QR code shown by 'auth login'."
+    echo -e "${TAB}${TAB}${YW}Tip:${CL} scanning the QR automatically selects the correct server in the app."
+    echo -e "${TAB}${TAB}${YW}Fallback:${CL} you can also configure the server manually using the links below."
+
+    urlencode_component() {
+      python3 -c 'import sys,urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$1"
+    }
+
+    CLIENT_SERVER_URL=""
+    if [[ "${REMOTE_ACCESS}" == "proxy" ]]; then
+      CLIENT_SERVER_URL="${PUBLIC_URL}"
+    elif [[ -n "${TAILSCALE_HTTPS_URL}" ]]; then
+      CLIENT_SERVER_URL="${TAILSCALE_HTTPS_URL}"
+    elif [[ "${REMOTE_ACCESS}" == "tailscale" ]]; then
+      CLIENT_SERVER_URL="<your-tailscale-https-url>"
+    elif [[ "${SETUP_BIND}" == "loopback" ]]; then
+      CLIENT_SERVER_URL="http://127.0.0.1:3005"
+    else
+      CLIENT_SERVER_URL="http://${LOCAL_IP}:3005"
+    fi
+
+    CLIENT_WEBAPP_URL=""
+    if [[ "${SERVE_UI}" == "1" ]]; then
+      if [[ "${REMOTE_ACCESS}" == "proxy" ]]; then
+        CLIENT_WEBAPP_URL="${PUBLIC_URL}"
+      elif [[ -n "${TAILSCALE_HTTPS_URL}" ]]; then
+        CLIENT_WEBAPP_URL="${TAILSCALE_HTTPS_URL}"
+      elif [[ "${REMOTE_ACCESS}" == "tailscale" ]]; then
+        CLIENT_WEBAPP_URL=""
+      elif [[ "${SETUP_BIND}" == "loopback" ]]; then
+        CLIENT_WEBAPP_URL="http://127.0.0.1:3005"
+      else
+        CLIENT_WEBAPP_URL="http://${LOCAL_IP}:3005"
+      fi
+    else
+      CLIENT_WEBAPP_URL="https://app.happier.dev"
+    fi
+
+    echo -e "${TAB}${TAB}${YW}Configure links:${CL}"
+    if [[ "${CLIENT_SERVER_URL}" == "<"*">" ]]; then
+      echo -e "${TAB}${TAB}${TAB}${GATEWAY}${BGN}happier://server?url=${CLIENT_SERVER_URL}${CL}"
+      if [[ -n "${CLIENT_WEBAPP_URL}" ]]; then
+        echo -e "${TAB}${TAB}${TAB}${GATEWAY}${BGN}${CLIENT_WEBAPP_URL}/server?url=${CLIENT_SERVER_URL}&auto=1${CL}"
+      fi
+    else
+      CLIENT_SERVER_URL_ENC="$(urlencode_component "${CLIENT_SERVER_URL}")"
+      echo -e "${TAB}${TAB}${TAB}${GATEWAY}${BGN}happier://server?url=${CLIENT_SERVER_URL_ENC}${CL}"
+      if [[ "${CLIENT_WEBAPP_URL}" == "https://app.happier.dev" && "${CLIENT_SERVER_URL}" != https://* ]]; then
+        echo -e "${TAB}${TAB}${TAB}${YW}Web app note:${CL} requires an HTTPS server URL (use Tailscale Serve or reverse proxy)."
+      elif [[ -n "${CLIENT_WEBAPP_URL}" ]]; then
+        echo -e "${TAB}${TAB}${TAB}${GATEWAY}${BGN}${CLIENT_WEBAPP_URL}/server?url=${CLIENT_SERVER_URL_ENC}&auto=1${CL}"
+      fi
+    fi
+    echo -e "${TAB}${YW}2)${CL} To connect a terminal/daemon from your laptop/desktop:"
+    echo -e "${TAB}${TAB}${YW}a)${CL} Add/select this server in your CLI:"
+    if [[ "${REMOTE_ACCESS}" == "proxy" ]]; then
+      echo -e "${TAB}${TAB}${TAB}${GATEWAY}${BGN}happier server add --server-url ${PUBLIC_URL} --use${CL}"
+    elif [[ -n "${TAILSCALE_HTTPS_URL}" ]]; then
+      echo -e "${TAB}${TAB}${TAB}${GATEWAY}${BGN}happier server add --server-url ${TAILSCALE_HTTPS_URL} --use${CL}"
+    elif [[ "${REMOTE_ACCESS}" == "tailscale" ]]; then
+      echo -e "${TAB}${TAB}${TAB}${GATEWAY}${BGN}happier server add --server-url <your-tailscale-https-url> --use${CL}"
+    elif [[ "${SETUP_BIND}" == "loopback" ]]; then
+      echo -e "${TAB}${TAB}${TAB}${GATEWAY}${BGN}happier server add --server-url http://127.0.0.1:3005 --use${CL}"
+    else
+      echo -e "${TAB}${TAB}${TAB}${GATEWAY}${BGN}happier server add --server-url http://${LOCAL_IP}:3005 --use${CL}"
+    fi
+    echo -e "${TAB}${TAB}${YW}b)${CL} Then run:"
+    echo -e "${TAB}${TAB}${TAB}${GATEWAY}${BGN}happier auth login${CL}"
+
+    motd_ssh
+    customize
+    cleanup_lxc
+    exit 0
+  fi
 fi
 
 SETUP_ENV=()
