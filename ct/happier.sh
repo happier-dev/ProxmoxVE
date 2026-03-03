@@ -62,8 +62,66 @@ function update_script() {
 
   # Legacy from-source stack install
   if [[ -x /home/happier/.happier-stack/bin/hstack ]]; then
-    msg_error "There is no update function for the legacy from-source install yet."
-    exit
+    local hstack_bin="/home/happier/.happier-stack/bin/hstack"
+    local where_json=""
+    local stack_home="/home/happier/.happier-stack"
+    local stack_env="/home/happier/.happier/stacks/main/env"
+    local stack_label="dev.happier.stack"
+    local workspace_dir=""
+
+    where_json="$(sudo -u happier -H "${hstack_bin}" where --json 2>/dev/null || true)"
+    if [[ -n "${where_json}" ]] && command -v jq >/dev/null 2>&1; then
+      _home="$(printf '%s' "${where_json}" | jq -r '.homeDir // empty' 2>/dev/null || true)"
+      _env="$(printf '%s' "${where_json}" | jq -r '.envFiles.main.path // empty' 2>/dev/null || true)"
+      _label="$(printf '%s' "${where_json}" | jq -r '.stack.label // empty' 2>/dev/null || true)"
+      _ws="$(printf '%s' "${where_json}" | jq -r '.workspaceDir // .workspace.dir // .workspace.path // empty' 2>/dev/null || true)"
+      [[ -n "${_home}" ]] && stack_home="${_home}"
+      [[ -n "${_env}" ]] && stack_env="${_env}"
+      [[ -n "${_label}" ]] && stack_label="${_label}"
+      [[ -n "${_ws}" ]] && workspace_dir="${_ws}"
+    fi
+
+    if [[ -z "${workspace_dir}" ]]; then
+      if [[ -d "${stack_home}/workspace/main" ]]; then
+        workspace_dir="${stack_home}/workspace/main"
+      elif [[ -d "${stack_home}/workspace" ]]; then
+        workspace_dir="$(find "${stack_home}/workspace" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | head -n 1 || true)"
+      fi
+    fi
+
+    msg_warn "This Happier installation was created using setup-from-source."
+    echo
+    echo "Repo workspace:"
+    if [[ -n "${workspace_dir}" ]]; then
+      echo "  ${workspace_dir}"
+    else
+      echo "  (not detected) expected under: ${stack_home}/workspace/"
+    fi
+    echo
+    echo "Manual update (advanced):"
+    echo "  1) Enter the container and switch user:"
+    echo "     pct enter <CTID>"
+    echo "     su - happier"
+    if [[ -n "${workspace_dir}" ]]; then
+      echo "  2) Update the repo (fast-forward only):"
+      echo "     cd \"${workspace_dir}\""
+      echo "     git pull --ff-only"
+    else
+      echo "  2) Locate the repo and update it:"
+      echo "     ls -la \"${stack_home}/workspace\""
+      echo "     cd \"${stack_home}/workspace/<name>\""
+      echo "     git pull --ff-only"
+    fi
+    echo "  3) Rebuild/restart:"
+    echo "     ${hstack_bin} build --no-tauri   # only if you serve the UI"
+    echo "     systemctl restart \"${stack_label}.service\"   # if autostart enabled"
+    echo "     ${hstack_bin} start --restart    # if running manually"
+    echo
+    echo "Config file:"
+    echo "  ${stack_env}"
+    echo
+    msg_ok "No automatic update was applied for setup-from-source installs."
+    exit 0
   fi
 
   msg_error "No ${APP} installation found."
