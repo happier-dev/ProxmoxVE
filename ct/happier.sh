@@ -139,7 +139,9 @@ function app_questions() {
     fi
   done
 
-  # HStack release channel selection (controls which npm dist-tag/version is installed via npx).
+  # Happier Stack release channel selection:
+  # - legacy install uses npm (@happier-dev/stack@latest|@next)
+  # - self-host runtime uses https://happier.dev/self-host(|-preview)
   local hstack_default="stable"
   if [[ -n "${HAPPIER_PVE_HSTACK_PACKAGE}" ]]; then
     if [[ "${HAPPIER_PVE_HSTACK_PACKAGE}" == "@happier-dev/stack@next" || "${HAPPIER_PVE_HSTACK_PACKAGE}" == "@happier-dev/stack@preview" ]]; then
@@ -156,8 +158,8 @@ function app_questions() {
   fi
 
   HAPPIER_PVE_HSTACK_CHANNEL=$(
-    whiptail --backtitle "$BACKTITLE" --title "HSTACK RELEASE CHANNEL" --radiolist \
-      "\nChoose which HStack release channel to install via npm:\n\n- stable: @happier-dev/stack@latest\n- preview: @happier-dev/stack@next\n- custom: pin a version or use another spec\n" 18 72 3 \
+    whiptail --backtitle "$BACKTITLE" --title "HAPPIER RELEASE CHANNEL" --radiolist \
+      "\nChoose a release channel:\n\n- stable: recommended for production\n- preview: pre-release (newer, less tested)\n\nNote: legacy installs use npm (@happier-dev/stack@latest|@next). Self-host runtime uses happier.dev installers.\n" 20 72 3 \
       "stable" "Stable (recommended)  (@happier-dev/stack@latest)" $([[ "$hstack_default" == "stable" ]] && echo ON || echo OFF) \
       "preview" "Preview / pre-release (@happier-dev/stack@next)" $([[ "$hstack_default" == "preview" ]] && echo ON || echo OFF) \
       "custom" "Custom (version or package spec)" $([[ "$hstack_default" == "custom" ]] && echo ON || echo OFF) \
