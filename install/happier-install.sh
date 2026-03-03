@@ -442,6 +442,12 @@ if [[ "${INSTALL_METHOD}" == "installers" ]]; then
     echo -e "${TAB}${GATEWAY}${BGN}tailscale serve status${CL}"
   fi
 
+  if [[ "${AUTOSTART}" != "1" ]]; then
+    echo -e "${INFO}${YW} Note:${CL} autostart is disabled, so services are not running."
+    echo -e "${INFO}${YW} Start manually:${CL}"
+    echo -e "${TAB}${GATEWAY}${BGN}systemctl start happier-server${CL}"
+  fi
+
   echo -e "${INFO}${YW} Next steps:${CL}"
 
   urlencode_component() {
@@ -529,6 +535,15 @@ if [[ "${INSTALL_METHOD}" == "installers" ]]; then
 
   motd_ssh
   customize
+
+  # customize() creates /usr/bin/update pointing to community-scripts; fix to use the fork.
+  cat >/usr/bin/update <<'UPDATEEOF'
+#!/usr/bin/env bash
+set -euo pipefail
+curl -fsSL https://raw.githubusercontent.com/happier-dev/ProxmoxVE/main/ct/happier.sh | bash
+UPDATEEOF
+  chmod +x /usr/bin/update
+
   cleanup_lxc
   exit 0
 fi
