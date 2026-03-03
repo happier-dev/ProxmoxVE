@@ -155,7 +155,7 @@ fi
 msg_info "Installing Happier (hstack setup) — package: ${HSTACK_PACKAGE}"
 (
   # Avoid sudo inheriting an inaccessible cwd (e.g. /root) for the happier user.
-  cd /home/happier
+  cd /home/happier || { msg_error "Failed to access /home/happier"; exit 1; }
   $STD sudo -u happier -H env "${SETUP_ENV[@]}" \
     npx --yes -p "${HSTACK_PACKAGE}" hstack setup "${SETUP_ARGS[@]}" </dev/null
 )
@@ -620,7 +620,11 @@ motd_ssh
 customize
 
 # customize() creates /usr/bin/update pointing to community-scripts; fix to use the fork.
-echo "bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/happier-dev/ProxmoxVE/main/ct/happier.sh)\"" >/usr/bin/update
+cat >/usr/bin/update <<'UPDATEEOF'
+#!/usr/bin/env bash
+set -euo pipefail
+curl -fsSL https://raw.githubusercontent.com/happier-dev/ProxmoxVE/main/ct/happier.sh | bash
+UPDATEEOF
 chmod +x /usr/bin/update
 
 cleanup_lxc
