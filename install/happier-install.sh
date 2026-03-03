@@ -22,6 +22,9 @@ setting_up_container
 network_check
 
 wait_for_apt_locks() {
+  if ! command -v fuser >/dev/null 2>&1; then
+    return 0
+  fi
   local waited_s=0
   while fuser /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/lib/apt/lists/lock /var/cache/apt/archives/lock >/dev/null 2>&1; do
     sleep 3
@@ -61,16 +64,47 @@ normalize_url_no_trailing_slash() {
   printf '%s' "$v"
 }
 
+normalize_https_public_url_or_empty() {
+  python3 - "$1" <<'PY' 2>/dev/null || true
+import sys
+from urllib.parse import urlsplit
+
+raw = (sys.argv[1] if len(sys.argv) > 1 else "").strip()
+if not raw:
+  sys.exit(0)
+
+u = urlsplit(raw)
+if u.scheme != "https":
+  sys.exit(0)
+if not u.netloc:
+  sys.exit(0)
+if u.username or u.password:
+  sys.exit(0)
+host = u.hostname
+if not host:
+  sys.exit(0)
+port = f":{u.port}" if u.port else ""
+path = u.path or ""
+
+# Drop query/hash and strip trailing slashes for consistency.
+out = f"https://{host}{port}{path}".rstrip("/")
+print(out, end="")
+PY
+}
+
 PUBLIC_URL="$(normalize_url_no_trailing_slash "$PUBLIC_URL_RAW")"
 if [[ "${REMOTE_ACCESS}" == "proxy" ]]; then
   if [[ -z "${PUBLIC_URL}" ]]; then
     msg_error "REMOTE_ACCESS=proxy requires HAPPIER_PVE_PUBLIC_URL (public HTTPS URL)."
     exit 1
   fi
-  if [[ "${PUBLIC_URL}" != https://* ]]; then
-    msg_error "HAPPIER_PVE_PUBLIC_URL must start with https:// (got: ${PUBLIC_URL})"
+  PUBLIC_URL_NORMALIZED="$(normalize_https_public_url_or_empty "${PUBLIC_URL}")"
+  if [[ -z "${PUBLIC_URL_NORMALIZED}" ]]; then
+    msg_error "HAPPIER_PVE_PUBLIC_URL must be a valid https:// URL (no credentials, no query/hash)."
+    msg_error "Got: ${PUBLIC_URL}"
     exit 1
   fi
+  PUBLIC_URL="${PUBLIC_URL_NORMALIZED}"
 fi
 
 HSTACK_CHANNEL="$(printf '%s' "${HSTACK_CHANNEL_RAW}" | tr -d '\r' | xargs | tr '[:upper:]' '[:lower:]')"
@@ -239,12 +273,14 @@ detect_tailscale_https_url() {
   local detected=""
   detected="$(sudo -u happier -H "$HSTACK_BIN" tailscale url 2>/dev/null | extract_https_url_from_text || true)"
   if [[ "$detected" == https://* ]]; then
+    detected="$(normalize_url_no_trailing_slash "$detected")"
     printf '%s' "$detected"
     return 0
   fi
 
   detected="$("$TAILSCALE_BIN" serve status 2>/dev/null | extract_https_url_from_text || true)"
   if [[ "$detected" == https://* ]]; then
+    detected="$(normalize_url_no_trailing_slash "$detected")"
     printf '%s' "$detected"
     return 0
   fi
@@ -306,8 +342,20 @@ fi
 get_lxc_ip
 if [[ "${REMOTE_ACCESS}" == "proxy" ]]; then
   set_env_kv "$STACK_ENV_FILE" "HAPPIER_STACK_SERVER_URL" "${PUBLIC_URL}"
+  set_env_kv "$STACK_ENV_FILE" "HAPPIER_PUBLIC_SERVER_URL" "${PUBLIC_URL}"
 elif [[ "${REMOTE_ACCESS}" != "tailscale" ]]; then
   set_env_kv "$STACK_ENV_FILE" "HAPPIER_STACK_SERVER_URL" "http://${LOCAL_IP}:3005"
+  set_env_kv "$STACK_ENV_FILE" "HAPPIER_PUBLIC_SERVER_URL" "http://${LOCAL_IP}:3005"
+fi
+if [[ "${SERVE_UI}" == "1" && "${REMOTE_ACCESS}" == "proxy" ]]; then
+  # Advertise that terminal-connect web UI is served from this same origin.
+  set_env_kv "$STACK_ENV_FILE" "HAPPIER_WEBAPP_URL" "${PUBLIC_URL}"
+elif [[ "${SERVE_UI}" == "1" && "${REMOTE_ACCESS}" != "tailscale" && "${SETUP_BIND}" == "lan" ]]; then
+  # Local-only installs can still serve the UI (but will not be reachable off-LAN without HTTPS).
+  set_env_kv "$STACK_ENV_FILE" "HAPPIER_WEBAPP_URL" "http://${LOCAL_IP}:3005"
+elif [[ "${SERVE_UI}" != "1" ]]; then
+  # Prefer the hosted web app when the local UI is not served.
+  set_env_kv "$STACK_ENV_FILE" "HAPPIER_WEBAPP_URL" "https://app.happier.dev"
 fi
 
 if [[ "${SERVE_UI}" == "1" ]]; then
@@ -463,6 +511,10 @@ if [[ "${REMOTE_ACCESS}" == "tailscale" && "${TAILSCALE_ENABLE_SERVE}" == "1" ]]
 
   if [[ -n "${TAILSCALE_HTTPS_URL}" ]]; then
     set_env_kv "$STACK_ENV_FILE" "HAPPIER_STACK_SERVER_URL" "${TAILSCALE_HTTPS_URL}"
+    set_env_kv "$STACK_ENV_FILE" "HAPPIER_PUBLIC_SERVER_URL" "${TAILSCALE_HTTPS_URL}"
+    if [[ "${SERVE_UI}" == "1" ]]; then
+      set_env_kv "$STACK_ENV_FILE" "HAPPIER_WEBAPP_URL" "${TAILSCALE_HTTPS_URL}"
+    fi
     # The service was started earlier without the Tailscale URL; restart so
     # it picks up the correct HAPPIER_STACK_SERVER_URL for deep links/QR codes.
     if [[ "${AUTOSTART}" == "1" ]]; then
@@ -532,8 +584,9 @@ elif [[ "${REMOTE_ACCESS}" == "tailscale" ]]; then
   fi
 fi
 echo -e "${INFO}${YW} Next steps:${CL}"
-echo -e "${TAB}${YW}1)${CL} Configure your Happier app/web to use this server (then sign in/create account)."
-echo -e "${TAB}${TAB}${YW}Recommended:${CL} use the mobile app first (easiest way to connect more devices later)."
+echo -e "${TAB}${YW}1)${CL} Connect with the mobile app (recommended): scan the QR code shown by 'auth login'."
+echo -e "${TAB}${TAB}${YW}Tip:${CL} scanning the QR automatically selects the correct server in the app."
+echo -e "${TAB}${TAB}${YW}Fallback:${CL} you can also configure the server manually using the links below."
 
 urlencode_component() {
   python3 -c 'import sys,urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$1"
@@ -588,7 +641,7 @@ fi
 if [[ "${REMOTE_ACCESS}" == "tailscale" && -z "${TAILSCALE_HTTPS_URL}" ]]; then
   echo -e "${TAB}${TAB}${YW}After you have your Tailscale HTTPS URL:${CL} re-run these to get the correct links/QR codes:"
   echo -e "${TAB}${TAB}${TAB}${GATEWAY}${BGN}su - happier -c \"${HSTACK_BIN} tailscale url\"${CL}"
-  echo -e "${TAB}${TAB}${TAB}${GATEWAY}${BGN}su - happier -c \"${HSTACK_BIN} auth login --print\"${CL}"
+  echo -e "${TAB}${TAB}${TAB}${GATEWAY}${BGN}su - happier -c \"${HSTACK_BIN} auth login --method=mobile --no-open\"${CL}"
 fi
 
 if [[ "${INSTALL_TYPE}" == "devbox" ]]; then

@@ -80,34 +80,48 @@ function app_questions() {
     HAPPIER_PVE_AUTOSTART="0"
   fi
 
-  HAPPIER_PVE_REMOTE_ACCESS=$(
-    whiptail --backtitle "$BACKTITLE" --title "HAPPIER" --radiolist \
-      "\nRemote access / HTTPS:\n" 14 72 3 \
-      "tailscale" "Tailscale (recommended HTTPS URL)" ON \
-      "proxy" "I will use my own reverse proxy (HTTPS)" OFF \
-      "none" "None (local only)" OFF \
-      3>&1 1>&2 2>&3
-  ) || exit_script
-
-  if [[ "$HAPPIER_PVE_REMOTE_ACCESS" == "proxy" ]]; then
-    HAPPIER_PVE_PUBLIC_URL=$(
-      whiptail --backtitle "$BACKTITLE" --title "REVERSE PROXY" --inputbox \
-        "\nEnter the public HTTPS URL for your reverse proxy.\n\nExample:\n  https://happier.example.com\n\nThis URL is used for deep links/QR codes and should be reachable from your phone/browser.\n" 18 72 \
+  while true; do
+    HAPPIER_PVE_REMOTE_ACCESS=$(
+      whiptail --backtitle "$BACKTITLE" --title "HAPPIER" --radiolist \
+        "\nServer URL for QR/deep links (choose how other devices will reach this server):\n" 16 72 3 \
+        "tailscale" "Tailscale HTTPS URL (recommended; works from your phone)" ON \
+        "proxy" "Custom HTTPS URL (reverse proxy; works from your phone)" OFF \
+        "none" "LAN-only (HTTP; not reachable off-LAN)" OFF \
         3>&1 1>&2 2>&3
     ) || exit_script
-  fi
 
-  if [[ "$HAPPIER_PVE_REMOTE_ACCESS" == "tailscale" ]]; then
-    var_tun="yes"
-    if (whiptail --backtitle "$BACKTITLE" --title "TAILSCALE" --yesno \
-      "\nProvide a Tailscale pre-auth key now?\n\nRecommended: use an ephemeral, one-time key.\n\nIf you skip this, the installer will still install Tailscale and you can run 'tailscale up' later inside the container.\n" 14 72); then
-      HAPPIER_PVE_TAILSCALE_AUTHKEY=$(
-        whiptail --backtitle "$BACKTITLE" --title "TAILSCALE" --passwordbox \
-          "\nPaste your Tailscale pre-auth key (optional; will not be saved).\n\nTip: leave blank to skip and enroll manually later.\n" 14 72 \
+    if [[ "$HAPPIER_PVE_REMOTE_ACCESS" == "proxy" ]]; then
+      HAPPIER_PVE_PUBLIC_URL=$(
+        whiptail --backtitle "$BACKTITLE" --title "CUSTOM HTTPS URL" --inputbox \
+          "\nEnter the HTTPS URL of your reverse proxy.\n\nExample:\n  https://happier.example.com\n\nThis URL will be embedded in QR codes/deep links and must be reachable from your phone.\n" 18 72 \
           3>&1 1>&2 2>&3
       ) || exit_script
+      break
     fi
-  fi
+
+    if [[ "$HAPPIER_PVE_REMOTE_ACCESS" == "tailscale" ]]; then
+      var_tun="yes"
+      if (whiptail --backtitle "$BACKTITLE" --title "TAILSCALE" --yesno \
+        "\nProvide a Tailscale pre-auth key now?\n\nRecommended: use an ephemeral, one-time key.\n\nIf you skip this, the installer will still install Tailscale and you can run 'tailscale up' later inside the container.\n" 14 72); then
+        HAPPIER_PVE_TAILSCALE_AUTHKEY=$(
+          whiptail --backtitle "$BACKTITLE" --title "TAILSCALE" --passwordbox \
+            "\nPaste your Tailscale pre-auth key (optional; will not be saved).\n\nTip: leave blank to skip and enroll manually later.\n" 14 72 \
+            3>&1 1>&2 2>&3
+        ) || exit_script
+      fi
+      break
+    fi
+
+    # LAN-only. Confirm to reduce confusion around QR codes not working off-LAN.
+    local lan_ui_note=""
+    if [[ "${HAPPIER_PVE_SERVE_UI}" == "1" ]]; then
+      lan_ui_note="\nIf you enabled serving the web UI, it will work only on your LAN/VPN.\nFor access from outside your LAN, you still need HTTPS (Tailscale Serve or a reverse proxy).\n"
+    fi
+    if (whiptail --backtitle "$BACKTITLE" --title "LAN-ONLY (HTTP)" --yesno \
+      "\nLAN-only mode will embed an HTTP LAN URL in QR/deep links (example: http://<container-lan-ip>:3005).\n\nThis works only when your phone/laptop are on the same LAN/VPN.\n${lan_ui_note}\nContinue with LAN-only mode?\n" 20 72); then
+      break
+    fi
+  done
 
   # HStack release channel selection (controls which npm dist-tag/version is installed via npx).
   local hstack_default="stable"
