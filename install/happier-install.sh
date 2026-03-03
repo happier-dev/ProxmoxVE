@@ -410,6 +410,10 @@ if [[ "${REMOTE_ACCESS}" == "tailscale" ]]; then
 fi
 
 if [[ "${AUTOSTART}" == "1" ]]; then
+  # Ensure the logs directory exists before the systemd service starts,
+  # otherwise StandardOutput=append:... fails with status=209/STDOUT.
+  mkdir -p "$(dirname "$STACK_ENV_FILE")/logs"
+  chown -R happier:happier "$(dirname "$STACK_ENV_FILE")/logs"
   msg_info "Enabling autostart (systemd system service)"
   $STD env HOME="${HAPPIER_HOME}" \
   HAPPIER_STACK_HOME_DIR="${HSTACK_HOME_DIR}" \
