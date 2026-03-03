@@ -6,13 +6,13 @@
     ],
     "date_created": "2026-02-07",
     "type": "ct",
-    "updateable": false,
+    "updateable": true,
     "privileged": false,
     "interface_port": 3005,
     "documentation": "https://happier.dev/docs/deployment/proxmox",
     "website": "https://happier.dev",
     "logo": "https://app.happier.dev/favicon.ico",
-    "config_path": "/home/happier/.happier/stacks/main/env",
+    "config_path": "/etc/happier/server.env",
     "description": "Happier is a self-hostable UI/CLI stack for monitoring and interacting with Claude Code, Codex, and Gemini sessions from a web UI and mobile.",
     "install_methods": [
         {
@@ -37,11 +37,11 @@
             "type": "warning"
         },
         {
-            "text": "This script installs the upstream Happier stack via npx (@happier-dev/stack). Review sources before installing.",
+            "text": "By default, this script installs Happier via official installers (recommended). For from-source installs, set HAPPIER_PVE_INSTALL_METHOD=from_source (uses npx @happier-dev/stack).",
             "type": "warning"
         },
         {
-            "text": "Optional: choose which HStack channel/version to install by setting HAPPIER_PVE_HSTACK_CHANNEL=stable|preview (preview maps to npm dist-tag @next), or HAPPIER_PVE_HSTACK_PACKAGE='@happier-dev/stack@<tag-or-version>'.",
+            "text": "Optional: choose release channel by setting HAPPIER_PVE_HSTACK_CHANNEL=stable|preview (preview uses happier.dev preview installers and npm dist-tag @next). Advanced: set HAPPIER_PVE_HSTACK_PACKAGE='@happier-dev/stack@<tag-or-version>' for from-source installs.",
             "type": "info"
         }
     ]

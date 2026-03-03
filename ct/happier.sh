@@ -48,6 +48,14 @@ function update_script() {
       msg_error "hstack not found on PATH. Try reinstalling self-host runtime."
       exit 1
     fi
+    # Optional: update Happier CLI binary if installed (devbox installs it by default).
+    if command -v happier >/dev/null 2>&1; then
+      msg_info "Updating ${APP} CLI (channel: ${channel})"
+      happier self update --channel="${channel}" >/dev/null 2>&1 || true
+      # Best-effort: restart any installed daemon system services to pick up the new binary.
+      systemctl restart 'happier-daemon.*.service' >/dev/null 2>&1 || true
+      msg_ok "Updated ${APP} CLI"
+    fi
     msg_ok "Updated ${APP}"
     exit
   fi
