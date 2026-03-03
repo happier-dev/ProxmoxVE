@@ -37,12 +37,23 @@ function update_script() {
   check_container_storage
   check_container_resources
 
-  if [[ ! -x /home/happier/.happier-stack/bin/hstack ]]; then
-    msg_error "No ${APP} Installation Found!"
+  # Self-host runtime install (production)
+  if [[ -f /opt/happier/self-host-state.json ]]; then
+    local channel
+    channel="$(jq -r '.channel // "stable"' /opt/happier/self-host-state.json 2>/dev/null || echo stable)"
+    msg_info "Updating ${APP} self-host runtime (channel: ${channel})"
+    npx --yes -p @happier-dev/stack@latest hstack self-host update --mode=system --channel="${channel}"
+    msg_ok "Updated ${APP}"
     exit
   fi
 
-  msg_error "There is no update function for ${APP}."
+  # Legacy from-source stack install
+  if [[ -x /home/happier/.happier-stack/bin/hstack ]]; then
+    msg_error "There is no update function for the legacy from-source install yet."
+    exit
+  fi
+
+  msg_error "No ${APP} installation found."
   exit
 }
 
