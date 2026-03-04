@@ -47,6 +47,8 @@ TAILSCALE_AUTHKEY="${HAPPIER_PVE_TAILSCALE_AUTHKEY:-}" # optional
 PUBLIC_URL_RAW="${HAPPIER_PVE_PUBLIC_URL:-}"           # required when REMOTE_ACCESS=proxy
 HSTACK_CHANNEL_RAW="${HAPPIER_PVE_HSTACK_CHANNEL:-stable}"     # stable | preview | custom
 HSTACK_PACKAGE_RAW="${HAPPIER_PVE_HSTACK_PACKAGE:-}"           # e.g. @happier-dev/stack@latest
+DAEMON_AUTH="${HAPPIER_PVE_DAEMON_AUTH:-0}"           # 1 | 0
+DAEMON_AUTH_DONE="0"
 TAILSCALE_ENABLE_SERVE="0"
 TAILSCALE_HTTPS_URL=""
 TAILSCALE_NEEDS_LOGIN="0"
@@ -486,6 +488,42 @@ fi
 
 msg_ok "Install complete"
 
+if [[ "${INSTALL_TYPE}" == "devbox" && "${SERVE_UI}" == "1" && "${DAEMON_AUTH}" == "1" ]]; then
+  AUTH_SERVER_URL=""
+  if [[ -n "${TAILSCALE_HTTPS_URL}" ]]; then
+    AUTH_SERVER_URL="${TAILSCALE_HTTPS_URL}"
+  elif [[ -n "${PUBLIC_URL}" ]]; then
+    AUTH_SERVER_URL="${PUBLIC_URL}"
+  else
+    AUTH_SERVER_URL="http://${LOCAL_IP}:3005"
+  fi
+
+  echo ""
+  echo -e "${INFO}${YW} Authenticate your daemon now.${CL}"
+  echo -e "${TAB}A QR code will appear — scan it with the Happier mobile app."
+  echo -e "${TAB}The app needs to reach: ${BGN}${AUTH_SERVER_URL}${CL}"
+  echo -e "${TAB}Press Ctrl+C to skip and do this later."
+  echo ""
+
+  if timeout 300 sudo -u happier -H "$HSTACK_BIN" auth login \
+    --method=mobile --no-open --start-if-needed </dev/null; then
+    DAEMON_AUTH_EXIT=0
+  else
+    DAEMON_AUTH_EXIT=$?
+  fi
+
+  if [[ $DAEMON_AUTH_EXIT -eq 0 ]]; then
+    DAEMON_AUTH_DONE="1"
+    if [[ "${AUTOSTART}" == "1" ]]; then
+      systemctl restart "${STACK_LABEL}.service" >/dev/null 2>&1 || true
+    fi
+    msg_ok "Daemon authenticated"
+  else
+    DAEMON_AUTH_DONE="0"
+    msg_warn "Daemon auth skipped (you can do it later)"
+  fi
+fi
+
 if [[ "${SETUP_BIND}" == "loopback" ]]; then
   echo -e "${INFO}${YW} Access (HTTP, inside container): ${CL}${TAB}${GATEWAY}${BGN}http://127.0.0.1:3005${CL}"
   echo -e "${INFO}${YW} Note:${CL} bind=loopback is not reachable from your LAN."
@@ -591,7 +629,9 @@ if [[ "${REMOTE_ACCESS}" == "tailscale" && -z "${TAILSCALE_HTTPS_URL}" ]]; then
   echo -e "${TAB}${TAB}${TAB}${GATEWAY}${BGN}su - happier -c \"${HSTACK_BIN} auth login --print\"${CL}"
 fi
 
-if [[ "${INSTALL_TYPE}" == "devbox" ]]; then
+if [[ "${INSTALL_TYPE}" == "devbox" && "${DAEMON_AUTH_DONE}" == "1" ]]; then
+  echo -e "${TAB}${YW}2)${CL} Daemon is authenticated and running."
+elif [[ "${INSTALL_TYPE}" == "devbox" ]]; then
   echo -e "${TAB}${YW}2)${CL} Connect the daemon running in this devbox (run inside the container):"
   echo -e "${TAB}${TAB}${GATEWAY}${BGN}sudo -u happier -H ${HSTACK_BIN} auth login --method=mobile --no-open${CL}"
   echo -e "${TAB}${YW}3)${CL} After login, restart the stack to start the daemon:"

@@ -55,6 +55,7 @@ function app_questions() {
   HAPPIER_PVE_REMOTE_ACCESS="none"
   HAPPIER_PVE_TAILSCALE_AUTHKEY=""
   HAPPIER_PVE_PUBLIC_URL=""
+  HAPPIER_PVE_DAEMON_AUTH="0"
   HAPPIER_PVE_HSTACK_CHANNEL="${HAPPIER_PVE_HSTACK_CHANNEL:-stable}"
   HAPPIER_PVE_HSTACK_PACKAGE="${HAPPIER_PVE_HSTACK_PACKAGE:-}"
 
@@ -109,6 +110,15 @@ function app_questions() {
     fi
   fi
 
+  if [[ "$HAPPIER_PVE_INSTALL_TYPE" == "devbox" && "$HAPPIER_PVE_SERVE_UI" == "1" ]]; then
+    if (whiptail --backtitle "$BACKTITLE" --title "DAEMON AUTH" --yesno \
+      "\nAuthenticate daemon during install?\n\nAfter setup completes, you'll see a QR code.\nScan it with the Happier mobile app to authenticate the daemon.\n\nSelect No to skip and authenticate manually later.\n" 15 72); then
+      HAPPIER_PVE_DAEMON_AUTH="1"
+    else
+      HAPPIER_PVE_DAEMON_AUTH="0"
+    fi
+  fi
+
   # HStack release channel selection (controls which npm dist-tag/version is installed via npx).
   local hstack_default="stable"
   if [[ -n "${HAPPIER_PVE_HSTACK_PACKAGE}" ]]; then
@@ -159,6 +169,7 @@ function app_questions() {
   export HAPPIER_PVE_REMOTE_ACCESS
   export HAPPIER_PVE_TAILSCALE_AUTHKEY
   export HAPPIER_PVE_PUBLIC_URL
+  export HAPPIER_PVE_DAEMON_AUTH
   export HAPPIER_PVE_HSTACK_CHANNEL
   export HAPPIER_PVE_HSTACK_PACKAGE
 }
