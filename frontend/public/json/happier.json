@@ -37,11 +37,15 @@
             "type": "warning"
         },
         {
-            "text": "By default, this script installs Happier via official installers (recommended). For from-source installs, set HAPPIER_PVE_INSTALL_METHOD=from_source (uses npx @happier-dev/stack).",
+            "text": "By default, this script installs Happier via the official CLI installer plus `happier relay host install` (recommended). For from-source installs, set HAPPIER_PVE_INSTALL_METHOD=from_source (uses `npx @happier-dev/stack hstack setup-from-source`).",
             "type": "warning"
         },
         {
-            "text": "Optional: choose release channel by setting HAPPIER_PVE_HSTACK_CHANNEL=stable|preview (preview uses happier.dev preview installers and npm dist-tag @next). Advanced: set HAPPIER_PVE_HSTACK_PACKAGE='@happier-dev/stack@<tag-or-version>' for from-source installs.",
+            "text": "Optional: choose release channel by setting HAPPIER_PVE_CHANNEL=stable|preview|dev. Advanced from-source installs can override the bootstrap package via HAPPIER_PVE_STACK_PACKAGE='@happier-dev/stack@<tag-or-version>'.",
+            "type": "info"
+        },
+        {
+            "text": "Default local relay port is 3005 and can be overridden with HAPPIER_PVE_SERVER_PORT. Preview/dev installer-mode configs use channel-specific paths such as /etc/happier-preview/server.env and /etc/happier-dev/server.env.",
             "type": "info"
         }
     ]
