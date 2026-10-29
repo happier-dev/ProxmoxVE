@@ -9,9 +9,9 @@
     "updateable": true,
     "privileged": false,
     "interface_port": 3005,
-    "documentation": "https://happier.dev/docs/deployment/proxmox",
+    "documentation": "https://docs.happier.dev/self-hosting/proxmox",
     "website": "https://happier.dev",
-    "logo": "https://app.happier.dev/favicon.ico",
+    "logo": "https://cloud.happier.dev/favicon.ico",
     "config_path": "/etc/happier/server.env",
     "description": "Happier is a self-hostable UI/CLI stack for monitoring and interacting with Claude Code, Codex, and Gemini sessions from a web UI and mobile.",
     "install_methods": [
@@ -37,15 +37,27 @@
             "type": "warning"
         },
         {
-            "text": "By default, this script installs Happier via the official CLI installer plus `happier relay host install` (recommended). For from-source installs, set HAPPIER_PVE_INSTALL_METHOD=from_source (uses `npx @happier-dev/stack hstack setup-from-source`).",
+            "text": "By default, this script installs Happier via the official CLI installer plus `happier relay host install` (recommended); the relay serves its bundled web UI. For from-source installs, set HAPPIER_PVE_INSTALL_METHOD=from_source (uses `npx @happier-dev/stack hstack setup-from-source`; HAPPIER_PVE_SERVE_UI=0 skips building the UI there).",
             "type": "warning"
         },
         {
-            "text": "Optional: choose release channel by setting HAPPIER_PVE_CHANNEL=stable|preview|dev. Advanced from-source installs can override the bootstrap package via HAPPIER_PVE_STACK_PACKAGE='@happier-dev/stack@<tag-or-version>'.",
+            "text": "Optional: choose release channel by setting HAPPIER_PVE_CHANNEL=stable|preview|dev. Advanced from-source installs can override the bootstrap package via HAPPIER_PVE_STACK_PACKAGE='@happier-dev/stack@<tag-or-version>'. Non-interactive installs: presetting any HAPPIER_PVE_* variable skips its prompt; with PHS_SILENT=1 (and mode=default) every un-preset prompt takes its default. HAPPIER_PVE_SKIN=0 keeps the stock community-scripts look (no Happier banner, colors or dialog theme).",
             "type": "info"
         },
         {
-            "text": "Default local relay port is 3005 and can be overridden with HAPPIER_PVE_SERVER_PORT. Preview/dev installer-mode configs use channel-specific paths such as /etc/happier-preview/server.env and /etc/happier-dev/server.env.",
+            "text": "Default local server port is 3005 and can be overridden with HAPPIER_PVE_SERVER_PORT (both install methods). The config_path /etc/happier/server.env applies to the default installer method; from-source installs store config at /home/happier/.happier/stacks/main/env instead. Preview/dev installer-mode configs use channel-specific paths such as /etc/happier-preview/server.env and /etc/happier-dev/server.env. Back up /var/lib/happier (or -preview/-dev): it holds the relay database and its master secret, which cannot be regenerated.",
+            "type": "info"
+        },
+        {
+            "text": "Devbox extras: HAPPIER_PVE_INSTALL_AGENTS (default 1) installs claude+codex on devbox installs — set 0 to skip; HAPPIER_PVE_GITHUB_PAT sets the daemon's GitHub token (GH_TOKEN); HAPPIER_PVE_AUTO_UPDATE=1 (+HAPPIER_PVE_AUTO_UPDATE_AT=HH:MM, default 04:00) installs a daily systemd timer (happier-pve-update.timer) that runs `update` unattended (default installer method only — from-source installs are updated manually via the Update action guidance). A devbox runs agent sessions, so 8GB+ RAM is recommended.",
+            "type": "info"
+        },
+        {
+            "text": "Supply-chain pinning: the install and update scripts are fetched from INSTALLER_REPO (default happier-dev/ProxmoxVE) at INSTALLER_REF (default main), or from COMMUNITY_SCRIPTS_URL when set. Export INSTALLER_REF=<tag-or-sha> before installing for a reproducible, pinned install; the generated /usr/bin/update keeps the same ref. The community-scripts/core engine is pinned to a vetted commit (override with HAPPIER_CORE_URL).",
+            "type": "info"
+        },
+        {
+            "text": "Updates stop before relay changes if the CLI bootstrap fails. Relay or daemon recovery failures are reported and make the update fail; correct the reported problem and run update again. Updates retain the installed daemon service identity and its enabled/running state. If multiple services match the Proxmox profile, inspect the CLI service list and select the intended setup before retrying. From-source devbox installs save agent paths and the optional GitHub token in the private stack env file before either manual or service startup.",
             "type": "info"
         }
     ]

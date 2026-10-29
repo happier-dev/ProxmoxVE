@@ -1,0 +1,132 @@
+# happier-dev fork: lint/validate the happier helper scripts.
+# Fork-owned (NOT gated to community-scripts), so it actually runs on this repo's PRs —
+# upstream has no shellcheck workflow, so nothing lints these files without this.
+# Note: uses no untrusted github.event.* inputs (no injection surface).
+#
+# Tool pinning: shellcheck and shfmt are downloaded as pinned releases with sha256
+# verification (apt's shellcheck lags years behind; releases/latest drifts silently).
+# Bump the *_VERSION/*_SHA256 pairs together, deliberately.
+name: happier-lint
+
+on:
+  pull_request:
+    paths:
+      - "ct/happier.sh"
+      - "install/happier-install.sh"
+      - "misc/happier-common.func"
+      - "json/happier.json"
+      - "frontend/public/json/happier.json"
+      - "tests/happier/**"
+      - ".github/workflows/happier-lint.yml"
+  push:
+    branches: [main]
+    paths:
+      - "ct/happier.sh"
+      - "install/happier-install.sh"
+      - "misc/happier-common.func"
+      - "json/happier.json"
+      - "frontend/public/json/happier.json"
+      - "tests/happier/**"
+      - ".github/workflows/happier-lint.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    env:
+      # Fork-owned files, fully linted (shellcheck --norc -S info, no excludes:
+      # they are clean at that level; intentional deviations carry per-line
+      # `# shellcheck disable=` directives with an explanation).
+      HAPPIER_SCRIPTS: "ct/happier.sh install/happier-install.sh misc/happier-common.func"
+      SHELLCHECK_VERSION: "v0.11.0"
+      SHELLCHECK_SHA256: "8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198"
+      SHFMT_VERSION: "v3.13.1"
+      SHFMT_SHA256: "fb096c5d1ac6beabbdbaa2874d025badb03ee07929f0c9ff67563ce8c75398b1"
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: bash -n (syntax) — scripts + tests
+        run: |
+          rc=0
+          for f in $HAPPIER_SCRIPTS tests/happier/*.sh; do
+            if bash -n "$f"; then echo "ok: $f"; else echo "SYNTAX FAIL: $f"; rc=1; fi
+          done
+          exit $rc
+
+      # P4: cache the pinned binaries keyed on their versions so they are not
+      # re-downloaded every run (~15-25s saved on a cache hit). Sha256 is still
+      # verified on the download path (cache miss). Bumping *_VERSION changes the
+      # key, forcing a fresh verified download.
+      - name: cache pinned shellcheck + shfmt
+        id: lint-tools
+        uses: actions/cache@v4
+        with:
+          path: ~/.happier-lint-tools
+          key: happier-lint-tools-${{ env.SHELLCHECK_VERSION }}-${{ env.SHFMT_VERSION }}
+
+      - name: install pinned shellcheck + shfmt (sha256-verified)
+        if: steps.lint-tools.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p "$HOME/.happier-lint-tools"
+          curl -fsSL --retry 3 -o /tmp/sc.tar.xz \
+            "https://github.com/koalaman/shellcheck/releases/download/${SHELLCHECK_VERSION}/shellcheck-${SHELLCHECK_VERSION}.linux.x86_64.tar.xz"
+          echo "${SHELLCHECK_SHA256}  /tmp/sc.tar.xz" | sha256sum -c -
+          tar -xJf /tmp/sc.tar.xz -C /tmp
+          mv "/tmp/shellcheck-${SHELLCHECK_VERSION}/shellcheck" "$HOME/.happier-lint-tools/shellcheck"
+          curl -fsSL --retry 3 -o /tmp/shfmt \
+            "https://github.com/mvdan/sh/releases/download/${SHFMT_VERSION}/shfmt_${SHFMT_VERSION}_linux_amd64"
+          echo "${SHFMT_SHA256}  /tmp/shfmt" | sha256sum -c -
+          chmod +x /tmp/shfmt && mv /tmp/shfmt "$HOME/.happier-lint-tools/shfmt"
+          chmod +x "$HOME/.happier-lint-tools/shellcheck"
+
+      - name: put pinned tools on PATH
+        run: |
+          echo "$HOME/.happier-lint-tools" >>"$GITHUB_PATH"
+          "$HOME/.happier-lint-tools/shellcheck" --version
+          "$HOME/.happier-lint-tools/shfmt" --version
+
+      - name: shellcheck (fork-owned files, no excludes)
+        run: |
+          # --norc: the repo-root .shellcheckrc carries upstream's broad excludes;
+          # the fork-owned files are held to the full ruleset at info severity.
+          rc=0
+          for f in $HAPPIER_SCRIPTS tests/happier/*.sh; do
+            shellcheck --norc -S info "$f" || rc=1
+          done
+          exit $rc
+
+      - name: shfmt diff (informational — fork-owned files, 2-space)
+        continue-on-error: true
+        run: shfmt -i 2 -ci -d $HAPPIER_SCRIPTS tests/happier/*.sh
+
+      - name: happier test suite (channel helpers, validators, update path)
+        run: bash tests/happier/run.sh
+
+      - name: json twins byte-identical (json/ vs frontend/public/json/)
+        run: |
+          # The installer JSON is duplicated for the frontend; they must stay
+          # byte-identical. CI now also triggers on the frontend copy (see paths).
+          if ! cmp -s json/happier.json frontend/public/json/happier.json; then
+            echo "json/happier.json and frontend/public/json/happier.json differ — keep them byte-identical:"
+            diff -u json/happier.json frontend/public/json/happier.json || true
+            exit 1
+          fi
+          echo "json twins in sync"
+
+      - name: validate json/happier.json (parse + installer contract)
+        run: |
+          python3 - <<'PY'
+          import json
+          d = json.load(open('json/happier.json'))
+          assert d['name'] == 'Happier' and d['slug'] == 'happier', 'name/slug'
+          assert d['type'] == 'ct', 'type'
+          assert type(d['interface_port']) is int and 1 <= d['interface_port'] <= 65535, 'interface_port'
+          m = d['install_methods']
+          assert m and m[0]['script'] == 'ct/happier.sh', 'install_methods script'
+          r = m[0]['resources']
+          assert all(k in r for k in ('cpu', 'ram', 'hdd', 'os', 'version')), 'resources'
+          assert d['notes'] and all(n.get('text') and n.get('type') in ('info', 'warning') for n in d['notes']), 'notes'
+          print('json valid + installer contract fields OK')
+          PY

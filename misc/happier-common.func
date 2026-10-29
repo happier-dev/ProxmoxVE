@@ -1,0 +1,623 @@
+#!/usr/bin/env bash
+# Copyright (c) 2021-2026 community-scripts ORG
+# Author: happier-dev
+# License: MIT | https://github.com/community-scripts/ProxmoxVE/raw/main/LICENSE
+# Source: https://happier.dev
+#
+# Shared Happier helpers used by BOTH ct/happier.sh (host-side) and
+# install/happier-install.sh (in-container). It is resolved from the scripts root
+# (COMMUNITY_SCRIPTS_URL or a local checkout) and sourced AFTER the
+# community-scripts/core engine, so the engine msg_* helpers are available. It
+# must be sourceable standalone — it depends only on those msg_* helpers.
+
+normalize_happier_channel() {
+  local raw
+  raw="$(printf '%s' "$1" | tr -d '\r' | xargs | tr '[:upper:]' '[:lower:]')"
+  case "${raw}" in
+    "" | stable)
+      printf '%s' "stable"
+      ;;
+    preview)
+      printf '%s' "preview"
+      ;;
+    dev | publicdev)
+      printf '%s' "dev"
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+# Normalize HAPPIER_PVE_INSTALL_METHOD (plus its legacy aliases) to installers |
+# from_source; returns 1 for anything else. Shared so the host-side prompts and
+# the in-container installer agree on the method.
+normalize_install_method() {
+  local raw
+  raw="$(printf '%s' "$1" | tr -d '\r' | xargs | tr '[:upper:]' '[:lower:]')"
+  case "${raw}" in
+    "" | auto | installers | installer | selfhost | self-host) printf '%s' "installers" ;;
+    from_source | from-source | source | setup | setup-from-source | legacy) printf '%s' "from_source" ;;
+    *) return 1 ;;
+  esac
+}
+
+# Validate supplied presets at both entry points before interpreting them or
+# forwarding a port into commands. Empty inputs retain each caller's defaults.
+validate_happier_presets() {
+  local key value
+  for key in HAPPIER_PVE_SERVE_UI HAPPIER_PVE_AUTOSTART HAPPIER_PVE_DAEMON_AUTH HAPPIER_PVE_INSTALL_AGENTS HAPPIER_PVE_AUTO_UPDATE; do
+    value="${!key:-}"
+    case "${value}" in
+      "" | 0 | 1) ;;
+      *) msg_error "Invalid ${key}; use 0 or 1."; return 1 ;;
+    esac
+  done
+  value="${HAPPIER_PVE_SERVER_PORT:-}"
+  if [[ -n "${value}" ]]; then
+    if [[ ! "${value}" =~ ^0*([1-9][0-9]{0,4})$ ]] || ((10#${BASH_REMATCH[1]} > 65535)); then
+      msg_error "Invalid HAPPIER_PVE_SERVER_PORT; use a TCP port from 1 to 65535."
+      return 1
+    fi
+  fi
+}
+
+# HH:MM (24h) for the auto-update timer.
+is_valid_hhmm() { [[ "$1" =~ ^([01][0-9]|2[0-3]):[0-5][0-9]$ ]]; }
+
+# Print the normalized public HTTPS URL (scheme+host+port+path, no trailing
+# slash, query/hash dropped), or nothing when the input is not a usable https://
+# URL (wrong scheme, no host, embedded credentials). Used by the host-side prompt
+# validation and the installer, so both accept exactly the same URLs.
+normalize_https_public_url_or_empty() {
+  python3 - "$1" <<'PY' 2>/dev/null || true
+import sys
+from urllib.parse import urlsplit
+
+raw = (sys.argv[1] if len(sys.argv) > 1 else "").strip()
+if not raw:
+  sys.exit(0)
+
+u = urlsplit(raw)
+if u.scheme != "https":
+  sys.exit(0)
+if not u.netloc:
+  sys.exit(0)
+if u.username or u.password:
+  sys.exit(0)
+host = u.hostname
+if not host:
+  sys.exit(0)
+if ":" in host:
+  host = f"[{host}]"
+port = f":{u.port}" if u.port else ""
+path = u.path or ""
+
+# Drop query/hash and strip trailing slashes for consistency.
+out = f"https://{host}{port}{path}".rstrip("/")
+print(out, end="")
+PY
+}
+
+channel_cli_name() {
+  case "$1" in
+    stable) printf '%s' "happier" ;;
+    preview) printf '%s' "hprev" ;;
+    dev) printf '%s' "hdev" ;;
+    *) return 1 ;;
+  esac
+}
+
+channel_suffix() {
+  case "$1" in
+    stable) printf '%s' "" ;;
+    preview) printf '%s' "-preview" ;;
+    dev) printf '%s' "-dev" ;;
+    *) return 1 ;;
+  esac
+}
+
+channel_relay_service_name() {
+  local suffix=""
+  suffix="$(channel_suffix "$1")" || return 1
+  printf '%s' "happier-server${suffix}"
+}
+
+channel_data_dir() {
+  local suffix=""
+  suffix="$(channel_suffix "$1")" || return 1
+  printf '%s' "/var/lib/happier${suffix}"
+}
+
+channel_config_env_path() {
+  local suffix=""
+  suffix="$(channel_suffix "$1")" || return 1
+  printf '%s' "/etc/happier${suffix}/server.env"
+}
+
+channel_state_path() {
+  local suffix=""
+  suffix="$(channel_suffix "$1")" || return 1
+  printf '%s' "/opt/happier${suffix}/self-host-state.json"
+}
+
+# Detect the installed channel by which channel's self-host-state.json exists, in
+# priority order stable > preview > dev. Prints the channel and returns 0; prints
+# nothing and returns 1 when none is present. Drives the update path's channel
+# selection (extracted from update_script so the priority is unit-testable).
+detect_installed_channel() {
+  local candidate="" state=""
+  for candidate in stable preview dev; do
+    state="$(channel_state_path "${candidate}")" || continue
+    if [[ -f "${state}" ]]; then
+      printf '%s' "${candidate}"
+      return 0
+    fi
+  done
+  return 1
+}
+
+channel_hosted_webapp_url() {
+  case "$1" in
+    stable | preview) printf '%s' "https://cloud.happier.dev" ;;
+    dev) printf '%s' "" ;;
+    *) return 1 ;;
+  esac
+}
+
+# Callers decide whether failure is fatal, but no restart failure is silent.
+restart_happier_unit() {
+  local rc=0
+  systemctl restart "$1" || rc=$?
+  if [[ "${rc}" -ne 0 ]]; then
+    msg_warn "Could not restart $1 (rc=${rc}); check systemctl status $1"
+  fi
+  return "${rc}"
+}
+
+# All daemon CLI operations use the same user, home and server context. Read-only
+# inventory omits --server so server_only containers need no Proxmox profile.
+happier_daemon_cli() {
+  local cli_bin="$1"
+  shift
+  HOME="${HAPPIER_HOME:-/home/happier}" \
+    HAPPIER_HOME_DIR="${HAPPIER_HOME:-/home/happier}/.happier" \
+    "${cli_bin}" "$@"
+}
+
+# The CLI owns service identities (cli-v0.2.16+ JSON contract).
+# Retain an existing default-following or Proxmox-pinned service; never choose a
+# unit by glob order or convert a pinned service to a second automatic service.
+# Sets HAPPIER_DAEMON_UNIT, _INSTALLED and _SERVICE_ARGS in the calling shell.
+# shellcheck disable=SC2034 # installed status is consumed by ct/install callers
+resolve_happier_daemon_service() {
+  local cli_bin="$1" channel="$2" inventory candidates profile_json profile_exists profile_id selected
+  HAPPIER_DAEMON_UNIT=""
+  HAPPIER_DAEMON_INSTALLED=0
+  HAPPIER_DAEMON_SERVICE_ARGS=()
+  inventory="$(happier_daemon_cli "${cli_bin}" service list --mode system --system-user happier --json)" || {
+    msg_error "Could not read Happier daemon service inventory"
+    return 1
+  }
+  candidates="$(jq -ce --arg home "${HAPPIER_HOME:-/home/happier}/.happier" --arg channel "${channel/dev/publicdev}" '
+    if (.entries | type) != "array" then error("invalid service inventory") else
+      [.entries[] | select(.installed == true and .platform == "linux" and .mode == "system"
+        and .happierHomeDir == $home and .releaseChannel == $channel)]
+    end' <<<"${inventory}")" || {
+    msg_error "Invalid Happier daemon service inventory"
+    return 1
+  }
+  [[ "${candidates}" == '[]' ]] && return 0
+  # An operator may run an unrelated daemon in a server_only container. Prove
+  # profile absence from the CLI inventory, rather than treating a failed lookup
+  # as absence or interpreting its diagnostic text.
+  profile_json="$(happier_daemon_cli "${cli_bin}" server list --json)" || {
+    msg_error "Could not read Happier server profiles"
+    return 1
+  }
+  profile_exists="$(jq -er '
+    select(.v == 1 and .ok == true and .kind == "server_list") | .data.profiles
+    | if type != "array" then error("invalid server profiles")
+      else any(.id == "proxmox" or .name == "proxmox") | tostring end' <<<"${profile_json}")" || {
+    msg_error "Invalid Happier server profile inventory"
+    return 1
+  }
+  [[ "${profile_exists}" == false ]] && return 0
+  profile_json="$(happier_daemon_cli "${cli_bin}" --server proxmox server current --json)" || {
+    msg_error "Could not read the Proxmox server profile"
+    return 1
+  }
+  profile_id="$(jq -er '
+    select(.v == 1 and .ok == true and .kind == "server_current") | .data.active.id
+    | select(type == "string" and length > 0)' <<<"${profile_json}")" || {
+    msg_error "Could not resolve the Proxmox server profile"
+    return 1
+  }
+  selected="$(jq -c --arg id "${profile_id}" '
+    [.[] | select(.targetMode == "default-following" or
+      (.targetMode == "pinned" and (.activeServerId // .serverId) == $id))]
+    | if length > 1 then error("multiple services serve Proxmox; select one before updating")
+      elif length == 1 then .[0] else null end' <<<"${candidates}")" || {
+    msg_error "Could not select one Happier daemon service; inspect service list --mode system"
+    return 1
+  }
+  [[ "${selected}" == null ]] && return 0
+  HAPPIER_DAEMON_UNIT="$(jq -er '.path | select(type == "string" and length > 0)' <<<"${selected}")" || return 1
+  HAPPIER_DAEMON_UNIT="${HAPPIER_DAEMON_UNIT##*/}"
+  if [[ "$(jq -r '.targetMode' <<<"${selected}")" == pinned ]]; then
+    local instance
+    instance="$(jq -er '.serverId | select(type == "string" and length > 0)' <<<"${selected}")" || return 1
+    HAPPIER_DAEMON_SERVICE_ARGS=(--instance "${instance}" --ring "${channel}")
+  fi
+  HAPPIER_DAEMON_INSTALLED=1
+  return 0
+}
+
+# Resolve the npm package spec for a channel: honors an explicit spec ($2) and
+# owns the channel defaults + the preview->next dist-tag back-compat alias.
+channel_default_stack_package() {
+  local channel="$1"
+  local pkg="${2:-}"
+  if [[ -z "${pkg}" ]]; then
+    case "${channel}" in
+      preview) pkg="@happier-dev/stack@next" ;;
+      *) pkg="@happier-dev/stack@latest" ;;
+    esac
+  fi
+  # Back-compat: the old "preview" dist-tag was renamed "next" on npm.
+  if [[ "${pkg}" == "@happier-dev/stack@preview" ]]; then
+    pkg="@happier-dev/stack@next"
+  fi
+  printf '%s' "${pkg}"
+}
+
+# Default happier-stack (from_source) layout. resolve_hstack_layout reports the
+# live values into HSTACK_WHERE_*; callers fall back to these when a field is
+# empty. Single source so ct/happier.sh (legacy update) and the installer agree.
+# shellcheck disable=SC2034 # consumed by the sourcing scripts (ct/happier.sh, install)
+HAPPIER_STACK_DEFAULT_BIN="/home/happier/.happier-stack/bin/hstack"
+# shellcheck disable=SC2034
+HAPPIER_STACK_DEFAULT_HOME="/home/happier/.happier-stack"
+# shellcheck disable=SC2034
+HAPPIER_STACK_DEFAULT_LABEL="dev.happier.stack"
+# shellcheck disable=SC2034
+HAPPIER_STACK_DEFAULT_ENV="/home/happier/.happier/stacks/main/env"
+
+# Resolve the hstack layout via `hstack where --json` (run as the happier user).
+# Sets HSTACK_WHERE_HOME/_LABEL/_ENV/_WORKSPACE ("" when undetected) —
+# callers apply their own defaults for empty fields. Requires jq; without it (or
+# on any hstack failure) every field stays empty and the callers' defaults win.
+resolve_hstack_layout() {
+  local hstack_bin="$1"
+  local where_json=""
+  HSTACK_WHERE_HOME=""
+  HSTACK_WHERE_LABEL=""
+  HSTACK_WHERE_ENV=""
+  HSTACK_WHERE_WORKSPACE=""
+  where_json="$(sudo -u happier -H "${hstack_bin}" where --json 2>/dev/null || true)"
+  if [[ -z "${where_json}" ]] || ! command -v jq >/dev/null 2>&1; then
+    return 0
+  fi
+  # shellcheck disable=SC2034 # consumed by the sourcing scripts, not this file
+  HSTACK_WHERE_HOME="$(printf '%s' "${where_json}" | jq -r '.homeDir // empty' 2>/dev/null || true)"
+  # shellcheck disable=SC2034
+  HSTACK_WHERE_LABEL="$(printf '%s' "${where_json}" | jq -r '.stack.label // empty' 2>/dev/null || true)"
+  # shellcheck disable=SC2034
+  HSTACK_WHERE_ENV="$(printf '%s' "${where_json}" | jq -r '.envFiles.main.path // empty' 2>/dev/null || true)"
+  # shellcheck disable=SC2034
+  HSTACK_WHERE_WORKSPACE="$(printf '%s' "${where_json}" | jq -r '.workspaceDir // .workspace.dir // .workspace.path // empty' 2>/dev/null || true)"
+  return 0
+}
+
+# Resolve the installed channel-matched Happier CLI path (non-fatal).
+# Prints the resolved path (empty if not found) and returns 0; returns 1 only
+# when the channel itself is invalid. Callers decide whether an empty result
+# is fatal.
+resolve_installed_cli_for_channel() {
+  local cli_name=""
+  cli_name="$(channel_cli_name "$1")" || return 1
+  local candidate=""
+  candidate="$(command -v "${cli_name}" 2>/dev/null || true)"
+  if [[ -z "${candidate}" ]]; then
+    # The bootstrap's BIN_DIR shim, its per-install bin/ shim (both point at
+    # <dir>/cli[-<channel>]/current/happier), then the pre-2026-10 /opt/happier/cli.
+    local _cand=""
+    for _cand in \
+      "/usr/local/bin/${cli_name}" \
+      "${HAPPIER_CLI_INSTALL_DIR}/bin/${cli_name}" \
+      "/opt/happier/cli/bin/${cli_name}"; do
+      if [[ -x "${_cand}" ]]; then
+        candidate="${_cand}"
+        break
+      fi
+    done
+  fi
+  printf '%s' "${candidate}"
+}
+
+# Install (or refresh) the devbox daemon's system unit, running as the happier
+# user against the "proxmox" server profile.
+#   $1 = CLI binary, $2 = 1 to enable at boot, anything else for --no-autostart
+# Runs as ROOT (`--mode system` requires it) with the happier home, then hands
+# anything created there back to happier. Returns the CLI's exit code: non-zero is
+# expected before auth (its "daemon became active" check cannot pass while the
+# unit waits for auth), so callers check for the unit instead. Re-run on every
+# update: the unit's ExecStart pins the CLI payload version that installed it.
+happier_install_daemon_service() {
+  local cli_bin="$1" autostart="$2" channel="${3:-${HAPPIER_CHANNEL:-stable}}"
+  resolve_happier_daemon_service "${cli_bin}" "${channel}" || return 1
+  local svc_args=(--server proxmox service install --mode system --system-user happier --yes "${HAPPIER_DAEMON_SERVICE_ARGS[@]}")
+  [[ "${autostart}" == "1" ]] || svc_args+=(--no-autostart)
+  local rc=0
+  # Do not hide service-install diagnostics in the engine's silent wrapper:
+  # a pre-auth activation timeout is expected, other failures need investigation.
+  happier_daemon_cli "${cli_bin}" "${svc_args[@]}" </dev/null || rc=$?
+  chown -R happier:happier "${HAPPIER_HOME:-/home/happier}/.happier" 2>/dev/null || true
+  return "${rc}"
+}
+
+# Where the happier.dev bootstrap installs the CLI. Deliberately OUTSIDE
+# /opt/happier: the stable relay runtime installs into /opt/happier and clears
+# every top-level entry there except config/data/logs/state on each install, which
+# deleted a CLI living at /opt/happier/cli (preview/dev use /opt/happier-<ch>).
+HAPPIER_CLI_INSTALL_DIR="/opt/happier-cli"
+
+# Install (or reinstall) the channel CLI via the official happier.dev bootstrap.
+# The bootstrap is downloaded to a temp file with retries/timeouts and checked
+# non-empty before it runs, instead of `curl | bash` (no timeout; a dropped
+# transfer runs a truncated script). The bootstrap verifies the CLI it fetches;
+# the bootstrap script itself is not pinned (same model as rustup/get.docker.com).
+# Returns non-zero on failure; callers decide whether that is fatal.
+install_happier_cli() {
+  local channel="$1"
+  local bootstrap=""
+  bootstrap="$(mktemp)" || return 1
+  if ! curl -fsSL --retry 3 --retry-delay 2 --connect-timeout 15 --max-time 120 \
+    "https://happier.dev/install" -o "${bootstrap}" || [[ ! -s "${bootstrap}" ]]; then
+    rm -f "${bootstrap}"
+    msg_error "Failed to download the Happier CLI installer from https://happier.dev/install"
+    return 1
+  fi
+  local rc=0
+  HAPPIER_PRODUCT="cli" \
+    HAPPIER_INSTALL_DIR="${HAPPIER_CLI_INSTALL_DIR}" \
+    HAPPIER_BIN_DIR="/usr/local/bin" \
+    HAPPIER_WITH_DAEMON="0" \
+    HAPPIER_NO_PATH_UPDATE="1" \
+    HAPPIER_NONINTERACTIVE="1" \
+    $STD bash "${bootstrap}" --channel "${channel}" </dev/null || rc=$?
+  rm -f "${bootstrap}"
+  # The bootstrap creates INSTALL_DIR mode 700 (it assumes a private $HOME
+  # default); the happier service user must be able to traverse it.
+  chmod 755 "${HAPPIER_CLI_INSTALL_DIR}" 2>/dev/null || true
+  return "${rc}"
+}
+
+# ── Skin ──────────────────────────────────────────────────────────────────────
+# Happier look for the community-scripts/core engine: banner, palette, status
+# icons, spinner, the whiptail theme/title bar and clearer update-menu wording.
+# All of it overrides engine INTERNALS (color/icons/color_spinner/get_header and
+# the engine's dialog strings), which are not a stable API: re-check them on
+# every HAPPIER_CORE_REF bump (tests/happier/test_skin.sh carries an
+# engine-contract test). HAPPIER_PVE_SKIN=0 keeps the stock look. Dev mode keeps
+# the engine's red greens, so a dev run is never mistaken for a normal install.
+#
+# Colors follow the dark theme of docs.happier.dev: warm near-black surfaces
+# (#131111 / #191717), light text (#efefef), warm gray (#8a817c) and the amber
+# accent (#e0b65a).
+
+HAPPIER_SKIN_BACKTITLE="Happier for Proxmox VE"
+
+# Dialog palettes (a preset NEWT_COLORS wins). newt takes xterm-256 "colorN"
+# names; 8/16-color terminals (e.g. the Linux console) get the named fallback.
+HAPPIER_NEWT_COLORS_256="root=color255,color233;roottext=color245,color233;helpline=color245,color233;shadow=,color232;window=color255,color234;border=color239,color234;title=color179,color234;label=color255,color234;textbox=color255,color234;acttextbox=color233,color179;button=color255,color237;actbutton=color233,color179;compactbutton=color255,color234;checkbox=color255,color234;actcheckbox=color233,color179;entry=color255,color235;disentry=color245,color234;listbox=color255,color234;actlistbox=color233,color179;sellistbox=color179,color234;actsellistbox=color233,color179;emptyscale=,color236;fullscale=,color179"
+HAPPIER_NEWT_COLORS_16="root=white,black;roottext=lightgray,black;helpline=lightgray,black;shadow=,black;window=white,black;border=gray,black;title=yellow,black;label=white,black;textbox=white,black;acttextbox=black,brown;button=white,gray;actbutton=black,brown;compactbutton=white,black;checkbox=white,black;actcheckbox=black,brown;entry=white,black;disentry=gray,black;listbox=white,black;actlistbox=black,brown;sellistbox=yellow,black;actsellistbox=black,brown;emptyscale=,gray;fullscale=,brown"
+
+# One SGR sequence as real ESC bytes (valid under %s, %b and echo -e alike).
+#   $1 = rrggbb, $2 = xterm-256 fallback, $3 = optional leading attrs ("1", "4")
+# Truecolor only when the terminal says so: SSH does not forward COLORTERM, so
+# most PVE shells get the 256-color approximation.
+_happier_sgr() {
+  local attrs="${3:+$3;}"
+  case "${COLORTERM:-}" in
+  truecolor | 24bit)
+    printf '\033[%s38;2;%d;%d;%dm' "${attrs}" "0x${1:0:2}" "0x${1:2:2}" "0x${1:4:2}"
+    ;;
+  *) printf '\033[%s38;5;%dm' "${attrs}" "$2" ;;
+  esac
+}
+
+# shellcheck disable=SC2034 # engine globals, read by the engine msg_* helpers
+_happier_palette() {
+  HAPPIER_ACCENT="$(_happier_sgr e0b65a 179 1)"
+  HAPPIER_MUTED="$(_happier_sgr 8a817c 245)"
+  YW="$(_happier_sgr efefef 255)"   # in-progress text
+  YWB="$(_happier_sgr fe9a00 208)"  # warnings
+  BL="$(_happier_sgr efefef 255)"   # values
+  RD="$(_happier_sgr fb2c36 203 1)" # errors
+  [[ -n "${dev_mode:-}" ]] && return 0
+  GN="$(_happier_sgr 00c951 41 1)"  # success
+  DGN="${HAPPIER_MUTED}"            # setting labels
+  BGN="$(_happier_sgr e0b65a 179)"  # setting values
+}
+
+# Single-width glyphs in the palette instead of the engine's emoji.
+# shellcheck disable=SC2034 # engine globals, read by the engine msg_* helpers
+_happier_icons() {
+  local t="${TAB:-  }" a="${HAPPIER_ACCENT}" m="${HAPPIER_MUTED}" c=$'\033[m' name
+  CM="${t}${GN}✔${c}${t}"
+  CROSS="${t}${RD}✘${c}${t}"
+  DNSOK="${GN}✔${c} "
+  DNSFAIL="${t}${RD}✘${c}${t}"
+  INFO="${t}${a}◆${c}${t}"
+  OVERRIDE="${t}${a}⇄${c}${t}"
+  CREATING="${t}${a}➜${c}${t}"
+  HOURGLASS="${t}${a}◌${c}${t}"
+  VERBOSE_CROPPED="${m}▸${c}${t}"
+  for name in OS OSVERSION CONTAINERTYPE DISKSIZE CPUCORE RAMSIZE SEARCH VERIFYPW \
+    CONTAINERID HOSTNAME BRIDGE NETWORK GATEWAY ICON_DISABLEIPV6 DEFAULT \
+    MACADDRESS VLANTAG ROOTSSH ADVANCED FUSE GPU; do
+    printf -v "${name}" '%s' "${t}${m}▸${c}${t}"
+  done
+}
+
+# The banner: the Happier app icon (rounded square, notch, smile) drawn in
+# half blocks, next to "happier" in figlet "slant" (like the engine's generated
+# headers) shaded from light to deep amber, plus a muted tagline.
+_happier_banner() {
+  local icon=(
+    "▄████    ████▄"
+    "█████▄▄▄▄█████"
+    "██████████████"
+    "██▄▀██████▀▄██"
+    "████▄▄▄▄▄▄████"
+    "▀████████████▀"
+  )
+  local shades=(f5d38f:222 f5b547:215 e0b65a:179 c99a3c:178 a87a1f:136 8a5a00:94)
+  local ic c=$'\033[m' i=0 line shade
+  ic="$(_happier_sgr efefef 255)"
+  # Breathing room: a blank line above and below, a 2-column left margin.
+  printf '\n'
+  while IFS= read -r line; do
+    shade="${shades[i]:-8a5a00:94}"
+    printf '  %s%s%s    %s%s%s\n' "${ic}" "${icon[i]:-              }" "${c}" \
+      "$(_happier_sgr "${shade%%:*}" "${shade##*:}" 1)" "${line}" "${c}"
+    i=$((i + 1))
+  done <<'BANNER'
+    __                      _
+   / /_  ____ _____  ____  (_)__  _____
+  / __ \/ __ `/ __ \/ __ \/ / _ \/ ___/
+ / / / / /_/ / /_/ / /_/ / /  __/ /
+/_/ /_/\__,_/ .___/ .___/_/\___/_/
+           /_/   /_/
+BANNER
+  printf '%s%20s%s%s\n' "$(_happier_sgr 8a817c 245)" "" "${HAPPIER_SKIN_BACKTITLE} · https://happier.dev" "${c}"
+  # Two blank lines before the first message. The engine captures the banner
+  # with $(get_header), which strips trailing newlines, so end on an invisible
+  # reset sequence instead (header_info's echo then supplies the last newline).
+  printf '\n%s' "${c}"
+}
+
+# 256-color terminal? (tput may be missing in a minimal container.)
+_happier_term_256() {
+  [[ "${COLORTERM:-}" == truecolor || "${COLORTERM:-}" == 24bit || "${TERM:-}" == *256color* ]] && return 0
+  local n=0
+  n="$(tput colors 2>/dev/null || echo 0)"
+  [[ "${n}" =~ ^[0-9]+$ ]] && ((n >= 256))
+}
+
+# One engine dialog string in, its Happier wording out. Only applied to the
+# engine's update menu (see the whiptail wrapper): the engine dispatches on the
+# item tags 1/2/3, so only titles, prompt, labels and the box width change.
+_happier_update_menu_arg() {
+  case "$1" in
+  *" LXC Update/Setting") printf '%s' "Update ${APP:-Happier}" ;;
+  "Support/Update functions for "*)
+    printf '%s' "Updates the ${APP:-Happier} CLI and relay in this container. Your settings and data are kept."
+    ;;
+  "YES (Silent Mode)") printf '%s' "Update now" ;;
+  "YES (Verbose Mode)") printf '%s' "Update and show full command output" ;;
+  "NO (Cancel Update)") printf '%s' "Cancel" ;;
+  60) printf '%s' 66 ;; # box width: fits the longest label
+  *) printf '%s' "$1" ;;
+  esac
+}
+
+# Flicker-free dialog runs. whiptail (newt/S-Lang) switches to the terminal's
+# alternate screen per dialog and back on exit, so a run of dialogs flashes the
+# normal screen (the banner) between every pick. Between happier_dialogs_begin
+# and _end the wrapper points whiptail at a terminfo copy of $TERM without the
+# smcup/rmcup switch: each dialog stays painted until the next one replaces it,
+# and _end redraws the banner over the last one. Best effort: without
+# infocmp/tic (ncurses-bin) the dialogs simply keep the stock behavior.
+happier_dialogs_begin() {
+  HAPPIER_DIALOG_TERMINFO=""
+  [[ "${HAPPIER_PVE_SKIN:-1}" == "0" ]] && return 0
+  command -v infocmp >/dev/null 2>&1 && command -v tic >/dev/null 2>&1 || return 0
+  local dir=""
+  dir="$(mktemp -d "${TMPDIR:-/tmp}/happier-terminfo.XXXXXX" 2>/dev/null)" || return 0
+  if infocmp -x "${TERM:-xterm}" 2>/dev/null | sed -E 's/(^|[[:space:]])(smcup|rmcup)=[^,]*,//g' >"${dir}/src" &&
+    tic -x -o "${dir}" "${dir}/src" >/dev/null 2>&1; then
+    HAPPIER_DIALOG_TERMINFO="${dir}"
+  else
+    rm -rf "${dir}"
+  fi
+  return 0
+}
+
+happier_dialogs_end() {
+  local dir="${HAPPIER_DIALOG_TERMINFO:-}"
+  HAPPIER_DIALOG_TERMINFO=""
+  [[ -n "${dir}" ]] || return 0
+  # Only if a dialog actually drew (the wrapper may run in a subshell, so it
+  # leaves a marker file rather than setting a variable).
+  if [[ -e "${dir}/shown" ]] && declare -f header_info >/dev/null 2>&1; then
+    header_info
+  fi
+  rm -rf "${dir}"
+}
+
+# Install the skin over the already-loaded engine. Call once, right after this
+# file is sourced (host and container). No-op without the engine (tests).
+# shellcheck disable=SC2034,SC2317,SC2329 # engine globals and callbacks invoked by the sourced engine
+happier_apply_skin() {
+  [[ "${HAPPIER_PVE_SKIN:-1}" == "0" ]] && return 0
+  declare -f color >/dev/null 2>&1 || return 0
+  # Keep the engine's color() (it resets CL and owns the dev-mode red) and layer
+  # the palette on top. ct/install call `color` again later, so the override must
+  # be the function, not just the variables. Guarded: a second call must not
+  # copy the override onto itself.
+  if ! declare -f _happier_engine_color >/dev/null 2>&1; then
+    eval "_happier_engine_color() $(declare -f color | tail -n +2)"
+  fi
+  color() {
+    _happier_engine_color
+    _happier_palette
+    _happier_icons
+  }
+  # Cancel exits inside app_questions, before its normal dialogs_end call.
+  # Release the skin's temporary files, then let the engine own exit behavior.
+  if declare -f exit_script >/dev/null 2>&1; then
+    if ! declare -f _happier_engine_exit_script >/dev/null 2>&1; then
+      eval "_happier_engine_exit_script() $(declare -f exit_script | tail -n +2)"
+    fi
+    exit_script() {
+      happier_dialogs_end || msg_warn "Could not remove temporary Happier dialog files"
+      _happier_engine_exit_script "$@"
+    }
+  fi
+  color_spinner() {
+    CS_YW="$(_happier_sgr efefef 255)"
+    CS_YWB="$(_happier_sgr e0b65a 179 1)"
+    CS_CL=$'\033[m'
+  }
+  get_header() { _happier_banner; }
+  # The engine hardcodes its backtitle in every dialog and words its update
+  # menu for all apps alike; rewrite both in flight. Exit status passes through
+  # (Cancel = 1, Esc = 255 drive the engine's flow).
+  whiptail() {
+    local args=() arg update_menu=0
+    for arg in "$@"; do
+      [[ "${arg}" == *" LXC Update/Setting" ]] && update_menu=1
+    done
+    for arg in "$@"; do
+      arg="${arg//Proxmox VE Helper Scripts/${HAPPIER_SKIN_BACKTITLE}}"
+      ((update_menu)) && arg="$(_happier_update_menu_arg "${arg}")"
+      args+=("${arg}")
+    done
+    if [[ -n "${HAPPIER_DIALOG_TERMINFO:-}" ]]; then
+      : >"${HAPPIER_DIALOG_TERMINFO}/shown" 2>/dev/null || true
+      TERMINFO="${HAPPIER_DIALOG_TERMINFO}" command whiptail "${args[@]}"
+      return
+    fi
+    command whiptail "${args[@]}"
+  }
+  if [[ -z "${NEWT_COLORS:-}" ]]; then
+    if _happier_term_256; then
+      export NEWT_COLORS="${HAPPIER_NEWT_COLORS_256}"
+    else
+      export NEWT_COLORS="${HAPPIER_NEWT_COLORS_16}"
+    fi
+  fi
+  color
+}
